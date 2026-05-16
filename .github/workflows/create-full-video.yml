@@ -1,0 +1,54 @@
+name: Create Full Video
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "30 13 * * *"
+
+jobs:
+  create-full-video:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install FFmpeg and fallback TTS engine
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg espeak-ng
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Generate story
+        env:
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python generate_story.py
+
+      - name: Generate video
+        env:
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+        run: python generate_video.py
+
+      - name: Upload generated video artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-video
+          path: output/*.mp4
+          if-no-files-found: error
+
+      - name: Upload generated visuals artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: generated-visuals
+          path: output/visuals/**
+          if-no-files-found: warn
