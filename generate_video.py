@@ -1,10 +1,11 @@
 import os
 import json
 import re
+import time
 import subprocess
-import textwrap
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import requests
 import gspread
@@ -13,18 +14,22 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips
 from google.oauth2.service_account import Credentials
 
+import arabic_reshaper
+from bidi.algorithm import get_display
+
 
 SHEET_ID = os.environ["GOOGLE_SHEET_ID"]
 SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
-PEXELS_API_KEY = os.environ.get("PEXELS_API_KEY", "")
-PIXABAY_API_KEY = os.environ.get("PIXABAY_API_KEY", "")
 
 CONTENT_SHEET_NAME = "Content"
 LOGS_SHEET_NAME = "Logs"
 
 OUTPUT_DIR = Path("output")
+FRAMES_DIR = OUTPUT_DIR / "frames"
 VISUALS_DIR = OUTPUT_DIR / "visuals"
+
 OUTPUT_DIR.mkdir(exist_ok=True)
+FRAMES_DIR.mkdir(parents=True, exist_ok=True)
 VISUALS_DIR.mkdir(parents=True, exist_ok=True)
 
 WIDTH = 1080
@@ -39,10 +44,7 @@ SCOPES = [
 
 def get_sheets_client():
     service_account_info = json.loads(SERVICE_ACCOUNT_JSON)
-    credentials = Credentials.from_service_account_info(
-        service_account_info,
-        scopes=SCOPES,
-    )
+    credentials = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
     return gspread.authorize(credentials)
 
 
@@ -58,392 +60,243 @@ def get_cell(row, col):
 
 def log(logs_sheet, video_id, action, message):
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    logs_sheet.append_row(
-        [now, video_id, action, message],
-        value_input_option="USER_ENTERED",
-    )
+    logs_sheet.append_row([now, video_id, action, message], value_input_option="USER_ENTERED")
 
 
-def clean_query(text):
-    text = text.lower()
-    text = re.sub(r"[^a-z0-9\s]", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-
-    remove_words = {
-        "emotional", "storybook", "illustration", "cinematic", "lighting",
-        "vertical", "youtube", "shorts", "style", "warm", "soft",
-        "detailed", "expressive", "animal", "emotion", "family", "friendly",
-        "text", "image", "prompt", "scene", "composition", "child", "safe",
-        "appealing", "adults", "kids", "no", "logos", "watermark",
-    }
-
-    words = [w for w in text.split() if w not in remove_words and len(w) > 2]
-    return " ".join(words[:8]).strip()
-
-
-def build_queries(scene, animal, topic):
-    scene_text = scene.get("text", "")
-    image_prompt = scene.get("image_prompt", "")
-
-    cleaned_prompt = clean_query(image_prompt)
-    cleaned_scene = clean_query(scene_text)
-    cleaned_topic = clean_query(topic)
-
-    queries = []
-
-    if animal and cleaned_scene:
-        queries.append(f"{animal} {cleaned_scene}")
-
-    if animal and cleaned_prompt:
-        queries.append(f"{animal} {cleaned_prompt}")
-
-    if animal and cleaned_topic:
-        queries.append(f"{animal} {cleaned_topic}")
-
-    if animal:
-        queries.append(f"{animal} cute")
-        queries.append(f"{animal} sad")
-        queries.append(f"{animal} close up")
-        queries.append(animal)
-
-    final = []
-    seen = set()
-
-    for q in queries:
-        q = re.sub(r"\s+", " ", q).strip()
-        if q and q not in seen:
-            final.append(q)
-            seen.add(q)
-
-    return final
-
-
-def download_file(url, output_path):
-    response = requests.get(url, timeout=60)
-    response.raise_for_status()
-    output_path.write_bytes(response.content)
-    return output_path
-
-
-def search_pexels_photo(query):
-    if not PEXELS_API_KEY:
-        return None
-
-    url = "https://api.pexels.com/v1/search"
-    headers = {"Authorization": PEXELS_API_KEY}
-    params = {
-        "query": query,
-        "orientation": "portrait",
-        "per_page": 10,
-    }
-
-    response = requests.get(url, headers=headers, params=params, timeout=45)
-    response.raise_for_status()
-
-    data = response.json()
-    photos = data.get("photos", [])
-
-    if not photos:
-        return None
-
-    best = sorted(
-        photos,
-        key=lambda p: abs((p.get("width", 1) / max(p.get("height", 1), 1)) - 0.5625),
-    )[0]
-
-    src = best.get("src", {})
-    return src.get("large2x") or src.get("large") or src.get("original")
-
-
-def search_pixabay_image(query):
-    if not PIXABAY_API_KEY:
-        return None
-
-    url = "https://pixabay.com/api/"
-    params = {
-        "key": PIXABAY_API_KEY,
-        "q": query,
-        "image_type": "photo",
-        "orientation": "vertical",
-        "safesearch": "true",
-        "per_page": 10,
-    }
-
-    response = requests.get(url, params=params, timeout=45)
-    response.raise_for_status()
-
-    data = response.json()
-    hits = data.get("hits", [])
-
-    if not hits:
-        return None
-
-    best = sorted(
-        hits,
-        key=lambda p: abs((p.get("imageWidth", 1) / max(p.get("imageHeight", 1), 1)) - 0.5625),
-    )[0]
-
-    return best.get("largeImageURL") or best.get("webformatURL")
-
-
-def fetch_visual_for_scene(scene, animal, topic, output_path):
-    queries = build_queries(scene, animal, topic)
-    last_error = None
-
-    for query in queries:
-        try:
-            image_url = search_pexels_photo(query)
-            if image_url:
-                download_file(image_url, output_path)
-                return {"source": "pexels", "query": query, "path": str(output_path)}
-        except Exception as e:
-            last_error = f"Pexels error for '{query}': {e}"
-
-    for query in queries:
-        try:
-            image_url = search_pixabay_image(query)
-            if image_url:
-                download_file(image_url, output_path)
-                return {"source": "pixabay", "query": query, "path": str(output_path)}
-        except Exception as e:
-            last_error = f"Pixabay error for '{query}': {e}"
-
-    raise ValueError(f"No visual found. Last error: {last_error}. Queries tried: {queries}")
-
-
-def fallback_gradient_frame():
-    image = Image.new("RGB", (WIDTH, HEIGHT), "#101820")
-    draw = ImageDraw.Draw(image)
-
-    for y in range(HEIGHT):
-        ratio = y / HEIGHT
-        r = int(12 + ratio * 18)
-        g = int(22 + ratio * 28)
-        b = int(34 + ratio * 38)
-        draw.line([(0, y), (WIDTH, y)], fill=(r, g, b))
-
-    return image
-
-
-def prepare_background(image_path):
-    try:
-        img = Image.open(image_path).convert("RGB")
-    except Exception:
-        return fallback_gradient_frame()
-
-    img = ImageOps.exif_transpose(img)
-
-    target_ratio = WIDTH / HEIGHT
-    img_ratio = img.width / img.height
-
-    if img_ratio > target_ratio:
-        new_height = HEIGHT
-        new_width = int(new_height * img_ratio)
-    else:
-        new_width = WIDTH
-        new_height = int(new_width / img_ratio)
-
-    img = img.resize((new_width, new_height), Image.LANCZOS)
-
-    left = (new_width - WIDTH) // 2
-    top = (new_height - HEIGHT) // 2
-    img = img.crop((left, top, left + WIDTH, top + HEIGHT))
-
-    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 95))
-    img = Image.alpha_composite(img.convert("RGBA"), overlay)
-
-    return img.convert("RGB")
-
-
-def load_font(size):
-    possible_fonts = [
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+def load_font(size, bold=True):
+    paths = [
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
 
-    for font_path in possible_fonts:
-        if Path(font_path).exists():
-            return ImageFont.truetype(font_path, size)
+    for p in paths:
+        if Path(p).exists():
+            return ImageFont.truetype(p, size)
 
     return ImageFont.load_default()
 
 
-def draw_centered_multiline(draw, text, font, y, fill, max_width, line_spacing=18):
+def fix_arabic(text):
+    if not text:
+        return ""
+    reshaped = arabic_reshaper.reshape(text)
+    return get_display(reshaped)
+
+
+def wrap_text(draw, text, font, max_width):
     words = text.split()
     lines = []
-    line = ""
+    current = ""
 
     for word in words:
-        test_line = (line + " " + word).strip()
-        bbox = draw.textbbox((0, 0), test_line, font=font)
+        test = (current + " " + word).strip()
+        bbox = draw.textbbox((0, 0), test, font=font)
         if bbox[2] - bbox[0] <= max_width:
-            line = test_line
+            current = test
         else:
-            if line:
-                lines.append(line)
-            line = word
+            if current:
+                lines.append(current)
+            current = word
 
-    if line:
-        lines.append(line)
+    if current:
+        lines.append(current)
 
-    line_heights = []
+    return lines
+
+
+def draw_centered_lines(draw, lines, font, center_y, fill, shadow=True, spacing=12):
+    heights = []
     for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font)
-        line_heights.append(bbox[3] - bbox[1])
+        heights.append(bbox[3] - bbox[1])
 
-    total_height = sum(line_heights) + line_spacing * (len(lines) - 1)
-    current_y = y - total_height // 2
+    total_h = sum(heights) + spacing * (len(lines) - 1)
+    y = center_y - total_h // 2
 
-    for line, line_height in zip(lines, line_heights):
+    for line, h in zip(lines, heights):
         bbox = draw.textbbox((0, 0), line, font=font)
-        line_width = bbox[2] - bbox[0]
-        x = (WIDTH - line_width) // 2
+        w = bbox[2] - bbox[0]
+        x = (WIDTH - w) // 2
 
-        draw.text((x + 5, current_y + 5), line, font=font, fill=(0, 0, 0, 210))
-        draw.text((x, current_y), line, font=font, fill=fill)
+        if shadow:
+            draw.text((x + 4, y + 4), line, font=font, fill=(0, 0, 0, 220))
+        draw.text((x, y), line, font=font, fill=fill)
 
-        current_y += line_height + line_spacing
+        y += h + spacing
 
 
-def create_frame(text, title, video_id, segment_index, total_segments, image_path):
-    img = prepare_background(image_path).convert("RGBA")
+def pollinations_image(prompt, output_path, seed):
+    final_prompt = f"""
+warm 2D cartoon storybook illustration, cute expressive animal character, soft colors,
+gentle emotional lighting, family friendly, vertical 9:16, no text, no watermark.
+Scene: {prompt}
+"""
 
-    top_overlay = Image.new("RGBA", (WIDTH, 260), (0, 0, 0, 115))
-    img.alpha_composite(top_overlay, (0, 0))
-
-    caption_box = Image.new("RGBA", (WIDTH - 120, 620), (0, 0, 0, 115))
-    caption_box = caption_box.filter(ImageFilter.GaussianBlur(1))
-    img.alpha_composite(caption_box, (60, 650))
-
-    draw = ImageDraw.Draw(img)
-
-    title_font = load_font(48)
-    body_font = load_font(72)
-    small_font = load_font(34)
-
-    brand = "Tiny Brave Tails"
-    draw.text((60, 70), brand, font=title_font, fill=(255, 235, 190, 255))
-
-    wrapped_title = textwrap.shorten(title, width=34, placeholder="...")
-    draw.text((60, 145), wrapped_title, font=small_font, fill=(235, 240, 245, 235))
-
-    draw_centered_multiline(
-        draw=draw,
-        text=text,
-        font=body_font,
-        y=960,
-        fill=(255, 255, 255, 255),
-        max_width=900,
-        line_spacing=20,
+    encoded = quote_plus(final_prompt)
+    url = (
+        f"https://image.pollinations.ai/prompt/{encoded}"
+        f"?width=1080&height=1920&seed={seed}&nologo=true&enhance=true"
     )
 
+    response = requests.get(url, timeout=120)
+    response.raise_for_status()
+
+    output_path.write_bytes(response.content)
+
+    try:
+        img = Image.open(output_path)
+        img.verify()
+    except Exception:
+        raise ValueError("Downloaded image is not valid.")
+
+    return output_path
+
+
+def fallback_background(output_path):
+    img = Image.new("RGB", (WIDTH, HEIGHT), "#15202b")
+    draw = ImageDraw.Draw(img)
+
+    for y in range(HEIGHT):
+        ratio = y / HEIGHT
+        r = int(18 + ratio * 25)
+        g = int(30 + ratio * 30)
+        b = int(45 + ratio * 35)
+        draw.line([(0, y), (WIDTH, y)], fill=(r, g, b))
+
+    img.save(output_path, quality=95)
+    return output_path
+
+
+def prepare_background(path):
+    try:
+        img = Image.open(path).convert("RGB")
+        img = ImageOps.exif_transpose(img)
+    except Exception:
+        return Image.open(fallback_background(FRAMES_DIR / "fallback_bg.jpg")).convert("RGB")
+
+    img = img.resize((WIDTH, HEIGHT), Image.LANCZOS)
+    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 45))
+    return Image.alpha_composite(img.convert("RGBA"), overlay).convert("RGB")
+
+
+def make_frame(video_id, scene_index, scene, title, image_path, total_scenes):
+    bg = prepare_background(image_path).convert("RGBA")
+    draw = ImageDraw.Draw(bg)
+
+    brand_font = load_font(42, True)
+    title_font = load_font(30, False)
+    en_font = load_font(54, True)
+    ar_font = load_font(42, True)
+    small_font = load_font(30, False)
+
+    top = Image.new("RGBA", (WIDTH, 190), (0, 0, 0, 105))
+    bg.alpha_composite(top, (0, 0))
+
+    draw.text((55, 48), "Tiny Brave Tails", font=brand_font, fill=(255, 238, 190, 255))
+    draw.text((55, 112), title[:48], font=title_font, fill=(240, 240, 240, 225))
+
+    # Bottom subtitle box
+    box_h = 360
+    subtitle_box = Image.new("RGBA", (WIDTH, box_h), (0, 0, 0, 150))
+    subtitle_box = subtitle_box.filter(ImageFilter.GaussianBlur(1))
+    bg.alpha_composite(subtitle_box, (0, HEIGHT - box_h - 80))
+
+    draw = ImageDraw.Draw(bg)
+
+    en_text = scene.get("en_subtitle", "").strip()
+    ar_text = fix_arabic(scene.get("ar_subtitle", "").strip())
+
+    en_lines = wrap_text(draw, en_text, en_font, 920)
+    ar_lines = wrap_text(draw, ar_text, ar_font, 920)
+
+    draw_centered_lines(
+        draw,
+        en_lines[:2],
+        en_font,
+        HEIGHT - 330,
+        fill=(255, 255, 255, 255),
+        spacing=10,
+    )
+
+    draw_centered_lines(
+        draw,
+        ar_lines[:2],
+        ar_font,
+        HEIGHT - 205,
+        fill=(255, 232, 170, 255),
+        spacing=8,
+    )
+
+    # Progress bar
     bar_x = 120
-    bar_y = 1700
+    bar_y = HEIGHT - 95
     bar_w = 840
     bar_h = 12
-    progress = (segment_index + 1) / total_segments
+    progress = scene_index / total_scenes
 
     draw.rounded_rectangle(
         (bar_x, bar_y, bar_x + bar_w, bar_y + bar_h),
         radius=8,
-        fill=(255, 255, 255, 60),
+        fill=(255, 255, 255, 65),
     )
     draw.rounded_rectangle(
         (bar_x, bar_y, bar_x + int(bar_w * progress), bar_y + bar_h),
         radius=8,
-        fill=(255, 235, 190, 235),
+        fill=(255, 232, 170, 245),
     )
 
     cta = "Follow for tiny stories with big lessons"
     bbox = draw.textbbox((0, 0), cta, font=small_font)
     draw.text(
-        ((WIDTH - (bbox[2] - bbox[0])) // 2, 1760),
+        ((WIDTH - (bbox[2] - bbox[0])) // 2, HEIGHT - 58),
         cta,
         font=small_font,
-        fill=(255, 255, 255, 235),
+        fill=(255, 255, 255, 220),
     )
 
-    frame_path = OUTPUT_DIR / f"frame_{video_id}_{segment_index:02d}.jpg"
-    img.convert("RGB").save(frame_path, quality=95)
+    frame_path = FRAMES_DIR / f"frame_{video_id}_{scene_index:02d}.jpg"
+    bg.convert("RGB").save(frame_path, quality=95)
     return frame_path
 
 
-def clean_text_for_tts(text):
-    text = text.replace("\n", " ")
-    text = re.sub(r"[“”]", '"', text)
-    text = re.sub(r"[‘’]", "'", text)
-    text = re.sub(r"\s+", " ", text)
-    return text.strip()
-
-
 def create_voice_with_gtts(script, output_audio):
-    clean_script = clean_text_for_tts(script)
+    clean_script = re.sub(r"\s+", " ", script.replace("\n", " ")).strip()
     tts = gTTS(text=clean_script, lang="en", slow=False, tld="com")
     tts.save(str(output_audio))
 
 
 def create_voice_with_espeak(script, output_audio):
-    clean_script = clean_text_for_tts(script)
+    clean_script = re.sub(r"\s+", " ", script.replace("\n", " ")).strip()
     command = [
         "espeak-ng",
-        "-v",
-        "en-us",
-        "-s",
-        "145",
-        "-p",
-        "45",
-        "-a",
-        "170",
-        "-w",
-        str(output_audio),
+        "-v", "en-us",
+        "-s", "145",
+        "-p", "45",
+        "-a", "170",
+        "-w", str(output_audio),
         clean_script,
     ]
     subprocess.run(command, check=True)
 
 
-def create_voice(script, safe_id):
-    mp3_path = OUTPUT_DIR / f"voice_{safe_id}.mp3"
-    wav_path = OUTPUT_DIR / f"voice_{safe_id}.wav"
+def create_voice(script, video_id):
+    mp3_path = OUTPUT_DIR / f"voice_{video_id}.mp3"
+    wav_path = OUTPUT_DIR / f"voice_{video_id}.wav"
 
     try:
         create_voice_with_gtts(script, mp3_path)
         return mp3_path, "gTTS"
     except Exception as e:
-        print(f"gTTS failed, falling back to espeak-ng: {e}")
+        print(f"gTTS failed. Fallback to espeak-ng. Error: {e}")
         create_voice_with_espeak(script, wav_path)
         return wav_path, "espeak-ng"
 
 
-def split_script_by_scenes(script, scenes):
-    scene_texts = []
+def create_video(video_id, title, script, scene_payload):
+    scenes = scene_payload["scenes"]
+    character = scene_payload.get("character", {})
+    char_desc = character.get("description", "")
 
-    if isinstance(scenes, list) and scenes:
-        for scene in scenes:
-            text = str(scene.get("text", "")).strip()
-            if text:
-                scene_texts.append(text)
-
-    if len(scene_texts) == 3:
-        return scene_texts
-
-    script = script.replace("\n", " ").strip()
-    parts = re.split(r"(?<=[.!?])\s+", script)
-    parts = [p.strip() for p in parts if p.strip()]
-
-    if len(parts) <= 3:
-        return parts
-
-    chunk_size = max(1, len(parts) // 3)
-    chunks = [
-        " ".join(parts[:chunk_size]),
-        " ".join(parts[chunk_size:chunk_size * 2]),
-        " ".join(parts[chunk_size * 2:]),
-    ]
-
-    return [c for c in chunks if c.strip()]
-
-
-def create_video(video_id, title, script, scenes, animal, topic):
     safe_id = str(video_id).strip() or "video"
     video_path = OUTPUT_DIR / f"tiny_brave_tails_{safe_id}.mp4"
 
@@ -451,65 +304,46 @@ def create_video(video_id, title, script, scenes, animal, topic):
     audio_clip = AudioFileClip(str(audio_path))
     audio_duration = audio_clip.duration
 
-    video_visual_dir = VISUALS_DIR / safe_id
-    video_visual_dir.mkdir(parents=True, exist_ok=True)
-
     visual_paths = []
-    fetch_results = []
 
     for i, scene in enumerate(scenes, start=1):
-        output_path = video_visual_dir / f"scene_{i}.jpg"
+        prompt = scene.get("image_prompt", "")
+        full_prompt = f"{char_desc}. {prompt}"
+
+        visual_path = VISUALS_DIR / f"visual_{safe_id}_{i:02d}.jpg"
 
         try:
-            result = fetch_visual_for_scene(scene, animal, topic, output_path)
-            fetch_results.append(result)
-            visual_paths.append(output_path)
+            pollinations_image(full_prompt, visual_path, seed=int(safe_id) * 100 + i)
+            time.sleep(1)
         except Exception as e:
-            print(f"Visual fetch failed for scene {i}: {e}")
-            fallback_path = video_visual_dir / f"fallback_{i}.jpg"
-            fallback_gradient_frame().save(fallback_path, quality=95)
-            visual_paths.append(fallback_path)
-            fetch_results.append(
-                {
-                    "source": "fallback",
-                    "query": "",
-                    "path": str(fallback_path),
-                }
-            )
+            print(f"Pollinations failed for scene {i}: {e}")
+            fallback_background(visual_path)
 
-    chunks = split_script_by_scenes(script, scenes)
-    total_segments = min(len(chunks), len(visual_paths))
+        visual_paths.append(visual_path)
 
-    if total_segments == 0:
-        raise ValueError("No script chunks available for video creation.")
+    total_scenes = len(scenes)
+    scene_duration = max(3.5, audio_duration / total_scenes)
 
-    chunks = chunks[:total_segments]
-    visual_paths = visual_paths[:total_segments]
-
-    total_chars = sum(len(chunk) for chunk in chunks)
     clips = []
 
-    for i, chunk in enumerate(chunks):
-        if total_chars > 0:
-            duration = max(3.0, audio_duration * (len(chunk) / total_chars))
-        else:
-            duration = audio_duration / total_segments
-
-        frame_path = create_frame(
-            text=chunk,
-            title=title,
+    for i, scene in enumerate(scenes, start=1):
+        frame_path = make_frame(
             video_id=safe_id,
-            segment_index=i,
-            total_segments=total_segments,
-            image_path=visual_paths[i],
+            scene_index=i,
+            scene=scene,
+            title=title,
+            image_path=visual_paths[i - 1],
+            total_scenes=total_scenes,
         )
 
-        # Stable version: no MoviePy resize effect to avoid Pillow ANTIALIAS error.
-        clip = ImageClip(str(frame_path)).set_duration(duration)
+        clip = ImageClip(str(frame_path)).set_duration(scene_duration)
         clips.append(clip)
 
     video = concatenate_videoclips(clips, method="compose")
     video = video.set_audio(audio_clip)
+
+    if video.duration > audio_duration:
+        video = video.subclip(0, audio_duration)
 
     video.write_videofile(
         str(video_path),
@@ -524,7 +358,7 @@ def create_video(video_id, title, script, scenes, animal, topic):
     audio_clip.close()
     video.close()
 
-    return video_path, voice_source, fetch_results
+    return video_path, voice_source
 
 
 def main():
@@ -534,16 +368,10 @@ def main():
     content_sheet = spreadsheet.worksheet(CONTENT_SHEET_NAME)
     logs_sheet = spreadsheet.worksheet(LOGS_SHEET_NAME)
 
-    all_values = content_sheet.get_all_values()
-
-    if not all_values:
-        raise ValueError("Content sheet is empty.")
-
-    headers = all_values[0]
+    values = content_sheet.get_all_values()
+    headers = values[0]
 
     id_col = find_column(headers, "id")
-    topic_col = find_column(headers, "topic")
-    animal_col = find_column(headers, "animal")
     script_col = find_column(headers, "script")
     title_col = find_column(headers, "title")
     status_col = find_column(headers, "status")
@@ -554,10 +382,8 @@ def main():
     target_row_number = None
     target_row = None
 
-    for index, row in enumerate(all_values[1:], start=2):
-        status = get_cell(row, status_col)
-
-        if status == "GENERATED":
+    for index, row in enumerate(values[1:], start=2):
+        if get_cell(row, status_col) == "GENERATED":
             target_row_number = index
             target_row = row
             break
@@ -568,30 +394,20 @@ def main():
         return
 
     video_id = get_cell(target_row, id_col)
-    topic = get_cell(target_row, topic_col)
-    animal = get_cell(target_row, animal_col)
     script = get_cell(target_row, script_col)
     title = get_cell(target_row, title_col)
-    scene_prompts_raw = get_cell(target_row, scene_prompts_col)
+    scene_raw = get_cell(target_row, scene_prompts_col)
 
-    if not script or not title:
-        raise ValueError(f"Missing script/title in row {target_row_number}")
+    if not script or not title or not scene_raw:
+        raise ValueError("Missing script/title/scene_prompts.")
 
-    if not scene_prompts_raw:
-        raise ValueError(f"Missing scene_prompts in row {target_row_number}")
+    scene_payload = json.loads(scene_raw)
 
-    scenes = json.loads(scene_prompts_raw)
-
-    if not isinstance(scenes, list) or len(scenes) != 3:
-        raise ValueError("scene_prompts must contain exactly 3 scenes.")
-
-    video_path, voice_source, fetch_results = create_video(
+    video_path, voice_source = create_video(
         video_id=video_id,
         title=title,
         script=script,
-        scenes=scenes,
-        animal=animal,
-        topic=topic,
+        scene_payload=scene_payload,
     )
 
     content_sheet.update_cell(target_row_number, status_col, "VIDEO_CREATED")
@@ -602,12 +418,11 @@ def main():
         logs_sheet,
         video_id,
         "GENERATE_VIDEO",
-        f"Video created for row {target_row_number}: {video_path}. Voice: {voice_source}. Visuals: {json.dumps(fetch_results)}",
+        f"Created 2D storybook bilingual video: {video_path}. Voice: {voice_source}",
     )
 
     print(f"Video created: {video_path}")
     print(f"Voice source: {voice_source}")
-    print(json.dumps(fetch_results, indent=2))
 
 
 if __name__ == "__main__":
