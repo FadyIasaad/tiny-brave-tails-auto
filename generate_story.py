@@ -46,41 +46,71 @@ def clean_json_response(text):
     return text[start:end + 1]
 
 
-def generate_story(topic, animal, lesson):
+def generate_story_package(topic, animal, lesson):
     genai.configure(api_key=GEMINI_API_KEY)
 
     model = genai.GenerativeModel("gemini-2.5-flash")
 
     prompt = f"""
-You are writing for a YouTube Shorts channel called Tiny Brave Tails.
+You are writing content for a YouTube Shorts channel called Tiny Brave Tails.
 
 Channel concept:
-Short emotional animal stories with simple life lessons.
+Short emotional animal stories with simple life lessons for an international English-speaking audience.
 
-Rules:
+Your job:
+Create one short story package.
+
+Strict rules:
 - English only.
 - Family-friendly.
-- No violence.
+- Emotional and heartwarming.
+- No gore.
 - No horror.
-- No claim that the story is true.
-- Simple emotional language.
+- No explicit violence.
+- No claim that the story is real.
 - Strong hook in the first sentence.
-- 35 to 55 seconds when read aloud.
+- Short, clear, easy English.
+- The full script should be around 35 to 50 seconds when read aloud.
 - End with one clear life lesson.
 - Do not mention AI.
 - Do not use markdown.
 - Return valid JSON only.
 
+Story inputs:
 Topic: {topic}
 Animal: {animal}
 Life lesson: {lesson}
 
-Return exactly this JSON structure:
+You must return exactly this JSON structure:
 {{
   "title": "Short YouTube title under 70 characters",
   "script": "Full narration script",
-  "description": "Short YouTube description with hashtags"
+  "description": "Short YouTube description with hashtags",
+  "scenes": [
+    {{
+      "scene_number": 1,
+      "text": "Short sentence or moment from the story",
+      "image_prompt": "Highly visual prompt for an emotional storybook-style illustration matching the moment, vertical 9:16"
+    }},
+    {{
+      "scene_number": 2,
+      "text": "Short sentence or moment from the story",
+      "image_prompt": "Highly visual prompt for an emotional storybook-style illustration matching the moment, vertical 9:16"
+    }},
+    {{
+      "scene_number": 3,
+      "text": "Short sentence or moment from the story",
+      "image_prompt": "Highly visual prompt for an emotional storybook-style illustration matching the moment, vertical 9:16"
+    }}
+  ]
 }}
+
+Scene rules:
+- Exactly 3 scenes.
+- The scenes must follow the story in order: beginning, middle, ending.
+- Each image prompt must visually match the story moment.
+- Style of every image prompt: emotional storybook illustration, cinematic lighting, expressive animal emotions, child-safe, appealing to both kids and adults, vertical 9:16.
+- Keep recurring character details consistent across the 3 image prompts.
 """
 
     response = model.generate_content(prompt)
@@ -92,11 +122,32 @@ Return exactly this JSON structure:
     title = str(data.get("title", "")).strip()
     script = str(data.get("script", "")).strip()
     description = str(data.get("description", "")).strip()
+    scenes = data.get("scenes", [])
 
     if not title or not script or not description:
-        raise ValueError(f"Gemini returned incomplete data: {data}")
+        raise ValueError(f"Gemini returned incomplete story data: {data}")
 
-    return title, script, description
+    if not isinstance(scenes, list) or len(scenes) != 3:
+        raise ValueError(f"Gemini returned invalid scenes data: {data}")
+
+    normalized_scenes = []
+    for i, scene in enumerate(scenes, start=1):
+        scene_number = scene.get("scene_number", i)
+        text = str(scene.get("text", "")).strip()
+        image_prompt = str(scene.get("image_prompt", "")).strip()
+
+        if not text or not image_prompt:
+            raise ValueError(f"Gemini returned incomplete scene at position {i}: {scene}")
+
+        normalized_scenes.append(
+            {
+                "scene_number": int(scene_number),
+                "text": text,
+                "image_prompt": image_prompt,
+            }
+        )
+
+    return title, script, description, normalized_scenes
 
 
 def find_column(headers, name):
@@ -136,6 +187,11 @@ def main():
     description_col = find_column(headers, "description")
     status_col = find_column(headers, "status")
     created_at_col = find_column(headers, "created_at")
+    scene_prompts_col = find_column(headers, "scene_prompts")
+    image_status_col = find_column(headers, "image_status")
+    audio_status_col = find_column(headers, "audio_status")
+    youtube_status_col = find_column(headers, "youtube_status")
+    youtube_video_id_col = find_column(headers, "youtube_video_id")
 
     target_row_number = None
     target_row = None
@@ -164,24 +220,30 @@ def main():
     if not topic or not animal or not lesson:
         raise ValueError(f"Missing topic/animal/lesson in row {target_row_number}")
 
-    title, script, description = generate_story(topic, animal, lesson)
+    title, script, description, scenes = generate_story_package(topic, animal, lesson)
 
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+    scene_prompts_json = json.dumps(scenes, ensure_ascii=False)
 
     content_sheet.update_cell(target_row_number, title_col, title)
     content_sheet.update_cell(target_row_number, script_col, script)
     content_sheet.update_cell(target_row_number, description_col, description)
+    content_sheet.update_cell(target_row_number, scene_prompts_col, scene_prompts_json)
     content_sheet.update_cell(target_row_number, status_col, "GENERATED")
     content_sheet.update_cell(target_row_number, created_at_col, now)
+    content_sheet.update_cell(target_row_number, image_status_col, "PENDING")
+    content_sheet.update_cell(target_row_number, audio_status_col, "PENDING")
+    content_sheet.update_cell(target_row_number, youtube_status_col, "")
+    content_sheet.update_cell(target_row_number, youtube_video_id_col, "")
 
     log(
         logs_sheet,
         video_id,
         "GENERATE_STORY",
-        f"Generated story for row {target_row_number}: {title}",
+        f"Generated story + 3 scene prompts for row {target_row_number}: {title}",
     )
 
-    print(f"Generated story for row {target_row_number}: {title}")
+    print(f"Generated story + 3 scene prompts for row {target_row_number}: {title}")
 
 
 if __name__ == "__main__":
