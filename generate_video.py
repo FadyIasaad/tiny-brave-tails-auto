@@ -249,11 +249,9 @@ def prepare_background(image_path):
     top = (new_height - HEIGHT) // 2
     img = img.crop((left, top, left + WIDTH, top + HEIGHT))
 
-    # cinematic dark overlay for text readability
     overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 95))
     img = Image.alpha_composite(img.convert("RGBA"), overlay)
 
-    # slight blur at edges feel
     return img.convert("RGB")
 
 
@@ -301,7 +299,6 @@ def draw_centered_multiline(draw, text, font, y, fill, max_width, line_spacing=1
         line_width = bbox[2] - bbox[0]
         x = (WIDTH - line_width) // 2
 
-        # thick shadow
         draw.text((x + 5, current_y + 5), line, font=font, fill=(0, 0, 0, 210))
         draw.text((x, current_y), line, font=font, fill=fill)
 
@@ -310,30 +307,25 @@ def draw_centered_multiline(draw, text, font, y, fill, max_width, line_spacing=1
 
 def create_frame(text, title, video_id, segment_index, total_segments, image_path):
     img = prepare_background(image_path).convert("RGBA")
+
+    top_overlay = Image.new("RGBA", (WIDTH, 260), (0, 0, 0, 115))
+    img.alpha_composite(top_overlay, (0, 0))
+
+    caption_box = Image.new("RGBA", (WIDTH - 120, 620), (0, 0, 0, 115))
+    caption_box = caption_box.filter(ImageFilter.GaussianBlur(1))
+    img.alpha_composite(caption_box, (60, 650))
+
     draw = ImageDraw.Draw(img)
 
     title_font = load_font(48)
     body_font = load_font(72)
     small_font = load_font(34)
 
-    # Top gradient box
-    top_overlay = Image.new("RGBA", (WIDTH, 260), (0, 0, 0, 115))
-    img.alpha_composite(top_overlay, (0, 0))
-
-    draw = ImageDraw.Draw(img)
-
     brand = "Tiny Brave Tails"
     draw.text((60, 70), brand, font=title_font, fill=(255, 235, 190, 255))
 
     wrapped_title = textwrap.shorten(title, width=34, placeholder="...")
     draw.text((60, 145), wrapped_title, font=small_font, fill=(235, 240, 245, 235))
-
-    # Caption background
-    caption_box = Image.new("RGBA", (WIDTH - 120, 620), (0, 0, 0, 115))
-    caption_box = caption_box.filter(ImageFilter.GaussianBlur(1))
-    img.alpha_composite(caption_box, (60, 650))
-
-    draw = ImageDraw.Draw(img)
 
     draw_centered_multiline(
         draw=draw,
@@ -345,7 +337,6 @@ def create_frame(text, title, video_id, segment_index, total_segments, image_pat
         line_spacing=20,
     )
 
-    # Progress bar
     bar_x = 120
     bar_y = 1700
     bar_w = 840
@@ -435,7 +426,6 @@ def split_script_by_scenes(script, scenes):
     if len(scene_texts) == 3:
         return scene_texts
 
-    # fallback sentence chunking
     script = script.replace("\n", " ").strip()
     parts = re.split(r"(?<=[.!?])\s+", script)
     parts = [p.strip() for p in parts if p.strip()]
@@ -449,6 +439,7 @@ def split_script_by_scenes(script, scenes):
         " ".join(parts[chunk_size:chunk_size * 2]),
         " ".join(parts[chunk_size * 2:]),
     ]
+
     return [c for c in chunks if c.strip()]
 
 
@@ -468,6 +459,7 @@ def create_video(video_id, title, script, scenes, animal, topic):
 
     for i, scene in enumerate(scenes, start=1):
         output_path = video_visual_dir / f"scene_{i}.jpg"
+
         try:
             result = fetch_visual_for_scene(scene, animal, topic, output_path)
             fetch_results.append(result)
@@ -477,7 +469,13 @@ def create_video(video_id, title, script, scenes, animal, topic):
             fallback_path = video_visual_dir / f"fallback_{i}.jpg"
             fallback_gradient_frame().save(fallback_path, quality=95)
             visual_paths.append(fallback_path)
-            fetch_results.append({"source": "fallback", "query": "", "path": str(fallback_path)})
+            fetch_results.append(
+                {
+                    "source": "fallback",
+                    "query": "",
+                    "path": str(fallback_path),
+                }
+            )
 
     chunks = split_script_by_scenes(script, scenes)
     total_segments = min(len(chunks), len(visual_paths))
@@ -506,14 +504,8 @@ def create_video(video_id, title, script, scenes, animal, topic):
             image_path=visual_paths[i],
         )
 
-        # subtle zoom-in effect
-        clip = (
-            ImageClip(str(frame_path))
-            .set_duration(duration)
-            .resize(lambda t: 1 + 0.025 * (t / max(duration, 0.1)))
-            .set_position("center")
-        )
-
+        # Stable version: no MoviePy resize effect to avoid Pillow ANTIALIAS error.
+        clip = ImageClip(str(frame_path)).set_duration(duration)
         clips.append(clip)
 
     video = concatenate_videoclips(clips, method="compose")
