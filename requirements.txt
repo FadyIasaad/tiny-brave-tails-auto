@@ -5,3 +5,4 @@ google-genai==1.49.0
 moviepy==1.0.3
 Pillow==10.4.0
 edge-tts==6.1.12
+requests==2.32.3
