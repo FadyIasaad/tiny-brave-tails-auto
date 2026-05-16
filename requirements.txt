@@ -1,9 +1,9 @@
 gspread==6.1.4
 google-auth==2.35.0
 google-generativeai==0.8.3
-google-genai==1.49.0
 moviepy==1.0.3
 Pillow==9.5.0
-edge-tts==6.1.12
 requests==2.32.3
 gTTS==2.5.3
+arabic-reshaper==3.0.0
+python-bidi==0.6.3
