@@ -1,22 +1,22 @@
-import os
+import hashlib
 import json
+import os
 import re
-import time
 import subprocess
+import time
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import quote_plus
 
-import requests
-import gspread
-from gtts import gTTS
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
-from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips
-from google.oauth2.service_account import Credentials
-
 import arabic_reshaper
+import gspread
+import requests
 from bidi.algorithm import get_display
-
+from google.oauth2.service_account import Credentials
+from gtts import gTTS
+from moviepy.editor import AudioFileClip, ImageClip, concatenate_videoclips
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 SHEET_ID = os.environ["GOOGLE_SHEET_ID"]
 SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
@@ -43,6 +43,16 @@ SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 
+ARABIC_DIACRITICS_RE = re.compile(r"[\u0610-\u061A\u064B-\u065F\u0670\u06D6-\u06ED]")
+DIRECTION_MARKS_RE = re.compile(r"[\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+ARABIC_RESHAPER = arabic_reshaper.ArabicReshaper(
+    {
+        "delete_harakat": True,
+        "support_ligatures": True,
+    }
+)
+
 
 def get_sheets_client():
     service_account_info = json.loads(SERVICE_ACCOUNT_JSON)
@@ -68,54 +78,72 @@ def log(logs_sheet, video_id, action, message):
 def load_latin_font(size, bold=True):
     paths = [
         "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/liberation2/LiberationSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/liberation2/LiberationSans-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
+
     for path in paths:
         if Path(path).exists():
             return ImageFont.truetype(path, size)
+
     return ImageFont.load_default()
 
 
 def load_arabic_font(size, bold=True):
     paths = [
-        "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Bold.ttf",
-        "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf",
-        "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
+        "/usr/share/fonts/truetype/noto/NotoSansArabic-Bold.ttf" if bold else "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+        "/usr/share/fonts/opentype/noto/NotoNaskhArabic-Bold.ttf" if bold else "/usr/share/fonts/opentype/noto/NotoNaskhArabic-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf" if bold else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     ]
+
     for path in paths:
         if Path(path).exists():
+            print(f"Using Arabic font: {path}")
             return ImageFont.truetype(path, size)
-    return ImageFont.load_default()
+
+    raise FileNotFoundError("No Arabic-capable font found. Install Noto Arabic fonts in the workflow.")
+
+
+def clean_arabic_text(text):
+    text = str(text or "")
+    text = unicodedata.normalize("NFC", text)
+    text = DIRECTION_MARKS_RE.sub("", text)
+    text = text.replace("ـ", "")
+    text = ARABIC_DIACRITICS_RE.sub("", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 
 def reshape_arabic_for_display(text):
-    text = text.strip()
+    text = clean_arabic_text(text)
     if not text:
         return ""
-    reshaped = arabic_reshaper.reshape(text)
-    return get_display(reshaped)
+
+    reshaped = ARABIC_RESHAPER.reshape(text)
+    return get_display(reshaped, base_dir="R")
+
+
+def text_width(draw, text, font):
+    bbox = draw.textbbox((0, 0), text, font=font)
+    return bbox[2] - bbox[0]
 
 
 def wrap_ltr(draw, text, font, max_width, max_lines=3):
-    words = text.split()
+    words = str(text or "").split()
     lines = []
     current = ""
 
     for word in words:
         test = (current + " " + word).strip()
-        bbox = draw.textbbox((0, 0), test, font=font)
-        if bbox[2] - bbox[0] <= max_width:
+        if text_width(draw, test, font) <= max_width:
             current = test
         else:
             if current:
                 lines.append(current)
             current = word
-
-        if len(lines) >= max_lines:
-            break
+            if len(lines) >= max_lines:
+                break
 
     if current and len(lines) < max_lines:
         lines.append(current)
@@ -124,24 +152,23 @@ def wrap_ltr(draw, text, font, max_width, max_lines=3):
 
 
 def wrap_arabic(draw, text, font, max_width, max_lines=3):
-    words = text.split()
+    cleaned = clean_arabic_text(text)
+    words = cleaned.split()
     logical_lines = []
     current = ""
 
     for word in words:
         test_logical = (current + " " + word).strip()
         test_visual = reshape_arabic_for_display(test_logical)
-        bbox = draw.textbbox((0, 0), test_visual, font=font)
 
-        if bbox[2] - bbox[0] <= max_width:
+        if text_width(draw, test_visual, font) <= max_width:
             current = test_logical
         else:
             if current:
                 logical_lines.append(current)
             current = word
-
-        if len(logical_lines) >= max_lines:
-            break
+            if len(logical_lines) >= max_lines:
+                break
 
     if current and len(logical_lines) < max_lines:
         logical_lines.append(current)
@@ -149,7 +176,7 @@ def wrap_arabic(draw, text, font, max_width, max_lines=3):
     return [reshape_arabic_for_display(line) for line in logical_lines[:max_lines]]
 
 
-def draw_centered_lines(draw, lines, font, center_y, fill, spacing=8):
+def draw_centered_lines(draw, lines, font, center_y, fill, spacing=8, shadow=True):
     heights = []
     for line in lines:
         bbox = draw.textbbox((0, 0), line, font=font)
@@ -163,18 +190,25 @@ def draw_centered_lines(draw, lines, font, center_y, fill, spacing=8):
         w = bbox[2] - bbox[0]
         x = (WIDTH - w) // 2
 
-        draw.text((x + 4, y + 4), line, font=font, fill=(0, 0, 0, 230))
+        if shadow:
+            draw.text((x + 4, y + 4), line, font=font, fill=(0, 0, 0, 235))
         draw.text((x, y), line, font=font, fill=fill)
-
         y += h + spacing
+
+
+def make_seed(video_id, scene_index):
+    key = f"{video_id}-{scene_index}".encode("utf-8")
+    return int(hashlib.sha256(key).hexdigest()[:8], 16)
 
 
 def pollinations_image(prompt, output_path, seed):
     final_prompt = f"""
-warm 2D cartoon storybook illustration, cute expressive animal character, soft colors,
-gentle emotional lighting, family friendly, vertical 9:16, no text, no watermark.
+warm 2D cartoon storybook illustration, cute expressive animal character,
+soft colors, gentle emotional lighting, family friendly, vertical 9:16,
+no text, no watermark.
 Scene: {prompt}
 """
+
     encoded = quote_plus(final_prompt)
     url = (
         f"https://image.pollinations.ai/prompt/{encoded}"
@@ -219,12 +253,12 @@ def prepare_background(path):
 def make_frame(video_id, scene_index, scene, title, image_path, total_scenes):
     bg = prepare_background(image_path).convert("RGBA")
 
-    top_overlay = Image.new("RGBA", (WIDTH, 220), (0, 0, 0, 100))
+    top_overlay = Image.new("RGBA", (WIDTH, 220), (0, 0, 0, 105))
     bg.alpha_composite(top_overlay, (0, 0))
 
-    subtitle_h = 450
+    subtitle_h = 500
     subtitle_y = HEIGHT - subtitle_h - 75
-    subtitle_box = Image.new("RGBA", (WIDTH, subtitle_h), (0, 0, 0, 160))
+    subtitle_box = Image.new("RGBA", (WIDTH, subtitle_h), (0, 0, 0, 168))
     subtitle_box = subtitle_box.filter(ImageFilter.GaussianBlur(1))
     bg.alpha_composite(subtitle_box, (0, subtitle_y))
 
@@ -233,7 +267,7 @@ def make_frame(video_id, scene_index, scene, title, image_path, total_scenes):
     brand_font = load_latin_font(42, True)
     title_font = load_latin_font(30, False)
     en_font = load_latin_font(46, True)
-    ar_font = load_arabic_font(42, True)
+    ar_font = load_arabic_font(43, True)
     small_font = load_latin_font(28, False)
 
     draw.text((55, 38), "Tiny Brave Tails", font=brand_font, fill=(255, 238, 190, 255))
@@ -244,8 +278,12 @@ def make_frame(video_id, scene_index, scene, title, image_path, total_scenes):
         draw.text((55, title_y), line, font=title_font, fill=(240, 240, 240, 230))
         title_y += 38
 
-    en_text = scene.get("subtitle_en", scene.get("narration_en", "")).strip()
-    ar_text = scene.get("subtitle_ar", "").strip()
+    en_text = str(scene.get("subtitle_en", scene.get("narration_en", ""))).strip()
+    ar_text = clean_arabic_text(scene.get("subtitle_ar", ""))
+
+    print(f"Arabic subtitle raw scene {scene_index}: {scene.get('subtitle_ar', '')}")
+    print(f"Arabic subtitle clean scene {scene_index}: {ar_text}")
+    print(f"Arabic subtitle display scene {scene_index}: {reshape_arabic_for_display(ar_text)}")
 
     en_lines = wrap_ltr(draw, en_text, en_font, 940, max_lines=3)
     ar_lines = wrap_arabic(draw, ar_text, ar_font, 940, max_lines=3)
@@ -254,25 +292,24 @@ def make_frame(video_id, scene_index, scene, title, image_path, total_scenes):
         draw,
         en_lines,
         en_font,
-        subtitle_y + 135,
+        subtitle_y + 145,
         fill=(255, 255, 255, 255),
         spacing=8,
     )
-
     draw_centered_lines(
         draw,
         ar_lines,
         ar_font,
-        subtitle_y + 305,
+        subtitle_y + 335,
         fill=(255, 232, 170, 255),
-        spacing=8,
+        spacing=10,
     )
 
     bar_x = 120
     bar_y = HEIGHT - 92
     bar_w = 840
     bar_h = 12
-    progress = scene_index / total_scenes
+    progress = scene_index / max(1, total_scenes)
 
     draw.rounded_rectangle(
         (bar_x, bar_y, bar_x + bar_w, bar_y + bar_h),
@@ -300,21 +337,26 @@ def make_frame(video_id, scene_index, scene, title, image_path, total_scenes):
 
 
 def create_gtts_audio(text, output_path):
-    clean = re.sub(r"\s+", " ", text.replace("\n", " ")).strip()
+    clean = re.sub(r"\s+", " ", str(text or "").replace("\n", " ")).strip()
     tts = gTTS(text=clean, lang="en", slow=False, tld="com")
     tts.save(str(output_path))
     return output_path
 
 
 def create_espeak_audio(text, output_path):
-    clean = re.sub(r"\s+", " ", text.replace("\n", " ")).strip()
+    clean = re.sub(r"\s+", " ", str(text or "").replace("\n", " ")).strip()
     command = [
         "espeak-ng",
-        "-v", "en-us",
-        "-s", "145",
-        "-p", "45",
-        "-a", "170",
-        "-w", str(output_path),
+        "-v",
+        "en-us",
+        "-s",
+        "145",
+        "-p",
+        "45",
+        "-a",
+        "170",
+        "-w",
+        str(output_path),
         clean,
     ]
     subprocess.run(command, check=True)
@@ -322,7 +364,7 @@ def create_espeak_audio(text, output_path):
 
 
 def create_scene_audio(scene, video_id, scene_index):
-    narration = scene.get("narration_en", "").strip()
+    narration = str(scene.get("narration_en", "")).strip()
     if not narration:
         raise ValueError(f"Missing narration_en for scene {scene_index}")
 
@@ -332,18 +374,38 @@ def create_scene_audio(scene, video_id, scene_index):
     try:
         create_gtts_audio(narration, mp3_path)
         return mp3_path, "gTTS"
-    except Exception as e:
-        print(f"gTTS failed for scene {scene_index}: {e}")
+    except Exception as exc:
+        print(f"gTTS failed for scene {scene_index}: {exc}")
         create_espeak_audio(narration, wav_path)
         return wav_path, "espeak-ng"
 
 
+def validate_scene_payload(scene_payload):
+    if not isinstance(scene_payload, dict):
+        raise ValueError("scene_prompts must be a JSON object.")
+
+    scenes = scene_payload.get("scenes")
+    if not isinstance(scenes, list) or not scenes:
+        raise ValueError("scene_prompts.scenes must be a non-empty list.")
+
+    for index, scene in enumerate(scenes, start=1):
+        if not scene.get("narration_en"):
+            raise ValueError(f"Missing narration_en in scene {index}.")
+        if not scene.get("subtitle_ar"):
+            raise ValueError(f"Missing subtitle_ar in scene {index}.")
+        if not scene.get("image_prompt"):
+            raise ValueError(f"Missing image_prompt in scene {index}.")
+
+    return scene_payload
+
+
 def create_video(video_id, title, scene_payload):
+    scene_payload = validate_scene_payload(scene_payload)
     scenes = scene_payload["scenes"]
     character = scene_payload.get("character", {})
-    char_desc = character.get("description", "")
+    char_desc = str(character.get("description", "")).strip()
 
-    safe_id = str(video_id).strip() or "video"
+    safe_id = re.sub(r"[^A-Za-z0-9_-]+", "_", str(video_id).strip() or "video")
     video_path = OUTPUT_DIR / f"tiny_brave_tails_{safe_id}.mp4"
 
     clips = []
@@ -351,16 +413,15 @@ def create_video(video_id, title, scene_payload):
     total_scenes = len(scenes)
 
     for i, scene in enumerate(scenes, start=1):
-        prompt = scene.get("image_prompt", "")
-        full_prompt = f"{char_desc}. {prompt}"
-
+        prompt = str(scene.get("image_prompt", "")).strip()
+        full_prompt = f"{char_desc}. {prompt}".strip()
         visual_path = VISUALS_DIR / f"visual_{safe_id}_{i:02d}.jpg"
 
         try:
-            pollinations_image(full_prompt, visual_path, seed=int(safe_id) * 100 + i)
+            pollinations_image(full_prompt, visual_path, seed=make_seed(safe_id, i))
             time.sleep(0.8)
-        except Exception as e:
-            print(f"Pollinations failed for scene {i}: {e}")
+        except Exception as exc:
+            print(f"Pollinations failed for scene {i}: {exc}")
             fallback_background(visual_path)
 
         audio_path, voice_source = create_scene_audio(scene, safe_id, i)
@@ -382,7 +443,6 @@ def create_video(video_id, title, scene_payload):
         clips.append(clip)
 
     video = concatenate_videoclips(clips, method="compose")
-
     video.write_videofile(
         str(video_path),
         fps=FPS,
@@ -395,17 +455,25 @@ def create_video(video_id, title, scene_payload):
 
     video.close()
 
+    for clip in clips:
+        try:
+            clip.close()
+        except Exception:
+            pass
+
     return video_path, ",".join(sorted(set(voice_sources)))
 
 
 def main():
     client = get_sheets_client()
     spreadsheet = client.open_by_key(SHEET_ID)
-
     content_sheet = spreadsheet.worksheet(CONTENT_SHEET_NAME)
     logs_sheet = spreadsheet.worksheet(LOGS_SHEET_NAME)
 
     values = content_sheet.get_all_values()
+    if not values:
+        raise ValueError("Content sheet is empty.")
+
     headers = values[0]
 
     id_col = find_column(headers, "id")
@@ -436,23 +504,28 @@ def main():
     if not title or not scene_raw:
         raise ValueError("Missing title or scene_prompts.")
 
-    scene_payload = json.loads(scene_raw)
+    try:
+        scene_payload = json.loads(scene_raw)
+        video_path, voice_source = create_video(video_id, title, scene_payload)
 
-    video_path, voice_source = create_video(video_id, title, scene_payload)
+        content_sheet.update_cell(target_row_number, status_col, "VIDEO_CREATED")
+        content_sheet.update_cell(target_row_number, image_status_col, "CREATED")
+        content_sheet.update_cell(target_row_number, audio_status_col, voice_source)
 
-    content_sheet.update_cell(target_row_number, status_col, "VIDEO_CREATED")
-    content_sheet.update_cell(target_row_number, image_status_col, "CREATED")
-    content_sheet.update_cell(target_row_number, audio_status_col, voice_source)
+        log(
+            logs_sheet,
+            video_id,
+            "GENERATE_VIDEO",
+            f"Created video with fixed Arabic rendering: {video_path}. Voice: {voice_source}",
+        )
 
-    log(
-        logs_sheet,
-        video_id,
-        "GENERATE_VIDEO",
-        f"Created fixed Arabic bilingual 2D storybook video: {video_path}. Voice: {voice_source}",
-    )
+        print(f"Video created: {video_path}")
+        print(f"Voice source: {voice_source}")
 
-    print(f"Video created: {video_path}")
-    print(f"Voice source: {voice_source}")
+    except Exception as exc:
+        content_sheet.update_cell(target_row_number, status_col, "FAILED_VIDEO")
+        log(logs_sheet, video_id, "GENERATE_VIDEO_FAILED", str(exc))
+        raise
 
 
 if __name__ == "__main__":
