@@ -6,7 +6,7 @@ google-api-python-client==2.151.0
 google-generativeai==0.8.3
 moviepy==1.0.3
 numpy==1.26.4
-Pillow==10.4.0
+Pillow==9.5.0
 requests==2.32.3
 gTTS==2.5.3
 edge-tts==7.2.8
