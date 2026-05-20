@@ -28,6 +28,17 @@ from moviepy.editor import (
 )
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont, ImageOps, ImageStat
 
+# Compatibility fix:
+# MoviePy 1.0.3 still calls PIL.Image.ANTIALIAS internally.
+# Pillow 10+ removed Image.ANTIALIAS, which causes GitHub Actions to crash
+# during animated resize/zoom. Keep this alias so the video engine works even
+# if a newer Pillow version is installed by the runner cache or dependencies.
+if not hasattr(Image, "ANTIALIAS"):
+    try:
+        Image.ANTIALIAS = Image.Resampling.LANCZOS
+    except AttributeError:
+        Image.ANTIALIAS = Image.LANCZOS
+
 SHEET_ID = os.environ["GOOGLE_SHEET_ID"]
 SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
 
