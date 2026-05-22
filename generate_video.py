@@ -1,8 +1,3 @@
-<think>
-The user is getting syntax errors in the code I provided. Let me provide a complete, properly working version without any syntax errors. I'll rewrite the entire file properly.
-</think> me give you the **complete, working code** without any errors. Save this as **`generate_video.py`**:
-
-```python
 import os
 import json
 import re
