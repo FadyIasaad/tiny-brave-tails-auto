@@ -113,7 +113,17 @@ def upload_video_to_youtube(video_path, title, description):
             "title": title[:100],
             "description": description[:5000],
             "categoryId": "1",
-            "tags": ["shorts", "animal story", "life lessons", "animated story", "Tiny Brave Tails"],
+            "tags": [
+                "shorts",
+                "animal story",
+                "emotional story",
+                "animated short",
+                "storybook animation",
+                "life lessons",
+                "cute animals",
+                "family friendly",
+                "Tiny Brave Tails",
+            ],
         },
         "status": {
             "privacyStatus": privacy_status,
