@@ -1,513 +1,391 @@
-import os
 import json
-import time
-import random
+import os
 import re
 from datetime import datetime, timezone
 
-import gspread
-from gspread.exceptions import APIError
-from google.oauth2.service_account import Credentials
-
 import google.generativeai as genai
 
+from tbt_common import (
+    get_sheets_client,
+    open_spreadsheet,
+    get_worksheet,
+    get_all_records,
+    get_all_values,
+    update_cell,
+    find_column,
+    find_optional_column,
+    log,
+    require_env,
+    run_with_retry,
+)
 
-# =========================
-# CONFIG
-# =========================
-
-SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
-SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+CONTENT_SHEET_NAME = os.getenv("CONTENT_SHEET_NAME", "Content").strip()
+LOGS_SHEET_NAME = os.getenv("LOGS_SHEET_NAME", "Logs").strip()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
 
-DEFAULT_WORKSHEET_NAME = os.getenv("WORKSHEET_NAME", "Sheet1").strip()
-
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash").strip()
+# Do NOT use Gemini 1.5 models. They now commonly return 404.
+MODEL_CANDIDATES = [
+    os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip(),
+    "gemini-2.5-flash-lite",
+    "gemini-2.0-flash",
+]
+MODEL_CANDIDATES = list(dict.fromkeys([m for m in MODEL_CANDIDATES if m]))
 
 REQUIRED_COLUMNS = [
-    "id",
-    "topic",
-    "animal",
-    "lesson",
-    "script",
-    "title",
-    "description",
-    "status",
-    "video_url",
-    "created_at",
+    "id", "topic", "animal", "lesson", "script", "title", "description", "status",
+    "video_url", "created_at", "scene_prompts", "image_status", "audio_status",
+    "youtube_status", "youtube_video_id", "video_file_path", "error_message",
 ]
 
-IDEA_STATUS = "IDEA"
-GENERATED_STATUS = "GENERATED"
-FAILED_STATUS = "FAILED"
+VALID_EMOTIONS = {"curious", "sad", "fear", "brave", "happy", "emotional", "worried", "lonely", "determined", "hopeful", "heartfelt"}
 
 
-# =========================
-# VALIDATION
-# =========================
-
-def require_env(name: str, value: str) -> None:
-    if not value:
-        raise RuntimeError(f"Missing required environment variable: {name}")
+def now_iso():
+    return datetime.now(timezone.utc).isoformat()
 
 
-def validate_environment() -> None:
-    require_env("GOOGLE_SHEET_ID", SHEET_ID)
-    require_env("GOOGLE_SERVICE_ACCOUNT_JSON", SERVICE_ACCOUNT_JSON)
-    require_env("GEMINI_API_KEY", GEMINI_API_KEY)
-
-
-# =========================
-# RETRY HELPERS
-# =========================
-
-def is_retryable_error(error: Exception) -> bool:
-    text = str(error).lower()
-
-    retryable_signals = [
-        "503",
-        "500",
-        "502",
-        "504",
-        "429",
-        "timeout",
-        "timed out",
-        "temporarily",
-        "temporary",
-        "service is currently unavailable",
-        "service unavailable",
-        "internal error",
-        "connection",
-        "rate limit",
-        "quota",
-        "deadline exceeded",
-    ]
-
-    return any(signal in text for signal in retryable_signals)
-
-
-def wait_before_retry(attempt: int, max_wait_seconds: int = 60) -> None:
-    wait_seconds = min(max_wait_seconds, (2 ** attempt) + random.uniform(0, 3))
-    print(f"Waiting {wait_seconds:.1f} seconds before retry...")
-    time.sleep(wait_seconds)
-
-
-def run_with_retry(action_name, func, max_attempts=6):
-    """
-    Run any temporary-failure-prone action with retries.
-    Good for Google Sheets, Gemini, and network calls.
-    """
-    last_error = None
-
-    for attempt in range(1, max_attempts + 1):
-        try:
-            print(f"{action_name}... attempt {attempt}/{max_attempts}")
-            return func()
-
-        except APIError as e:
-            last_error = e
-
-            if not is_retryable_error(e):
-                print(f"Non-retryable Google API error during {action_name}: {e}")
-                raise
-
-            print(f"Temporary Google API error during {action_name}: {e}")
-            wait_before_retry(attempt)
-
-        except Exception as e:
-            last_error = e
-
-            if not is_retryable_error(e):
-                print(f"Non-retryable error during {action_name}: {e}")
-                raise
-
-            print(f"Temporary error during {action_name}: {e}")
-            wait_before_retry(attempt)
-
-    raise RuntimeError(
-        f"{action_name} failed after {max_attempts} attempts. Last error: {last_error}"
-    )
-
-
-# =========================
-# GOOGLE SHEETS
-# =========================
-
-def get_gspread_client():
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-
-    try:
-        service_account_info = json.loads(SERVICE_ACCOUNT_JSON)
-    except json.JSONDecodeError as e:
-        raise RuntimeError(
-            "GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON. "
-            "Check your GitHub Secret and make sure you copied the full JSON."
-        ) from e
-
-    credentials = Credentials.from_service_account_info(
-        service_account_info,
-        scopes=scopes,
-    )
-
-    return gspread.authorize(credentials)
-
-
-def open_sheet_with_retry(client, sheet_id):
-    return run_with_retry(
-        "Opening Google Sheet",
-        lambda: client.open_by_key(sheet_id),
-        max_attempts=6,
-    )
-
-
-def get_worksheet(spreadsheet):
-    """
-    Try to open worksheet by name.
-    If it does not exist, use first worksheet.
-    """
-    try:
-        return run_with_retry(
-            f"Opening worksheet '{DEFAULT_WORKSHEET_NAME}'",
-            lambda: spreadsheet.worksheet(DEFAULT_WORKSHEET_NAME),
-            max_attempts=4,
-        )
-    except Exception as e:
-        print(f"Could not open worksheet '{DEFAULT_WORKSHEET_NAME}': {e}")
-        print("Trying first worksheet instead...")
-        return run_with_retry(
-            "Opening first worksheet",
-            lambda: spreadsheet.get_worksheet(0),
-            max_attempts=4,
-        )
-
-
-def ensure_headers(worksheet):
-    """
-    Make sure the first row has all required columns.
-    If the sheet is empty, create the headers.
-    """
-    values = run_with_retry(
-        "Reading header row",
-        lambda: worksheet.row_values(1),
-        max_attempts=6,
-    )
-
+def ensure_headers(sheet):
+    values = get_all_values(sheet)
     if not values:
-        print("Sheet has no headers. Creating required headers...")
-        run_with_retry(
-            "Writing header row",
-            lambda: worksheet.update("A1:J1", [REQUIRED_COLUMNS]),
-            max_attempts=6,
-        )
+        update_cell(sheet, 1, 1, REQUIRED_COLUMNS[0])
+        for idx, header in enumerate(REQUIRED_COLUMNS, start=1):
+            update_cell(sheet, 1, idx, header)
         return REQUIRED_COLUMNS
-
-    normalized_existing = [v.strip() for v in values]
-    missing = [col for col in REQUIRED_COLUMNS if col not in normalized_existing]
-
+    headers = [str(h).strip() for h in values[0]]
+    missing = [h for h in REQUIRED_COLUMNS if h not in headers]
     if missing:
         raise RuntimeError(
-            "Your Google Sheet is missing required columns: "
-            + ", ".join(missing)
-            + "\nRequired columns are: "
-            + ", ".join(REQUIRED_COLUMNS)
+            "Content sheet is missing required columns: " + ", ".join(missing) +
+            "\nYour first row must contain: " + ", ".join(REQUIRED_COLUMNS)
         )
-
-    return normalized_existing
-
-
-def get_all_records_with_retry(worksheet):
-    return run_with_retry(
-        "Reading worksheet records",
-        lambda: worksheet.get_all_records(),
-        max_attempts=6,
-    )
+    return headers
 
 
-def find_first_idea_row(records):
-    """
-    Returns:
-    - sheet row number, because records start after header row
-    - record dictionary
-    """
-    for index, record in enumerate(records, start=2):
-        status = str(record.get("status", "")).strip().upper()
-        topic = str(record.get("topic", "")).strip()
-
-        if status == IDEA_STATUS and topic:
-            return index, record
-
+def find_first_idea(records):
+    for row_number, record in enumerate(records, start=2):
+        if str(record.get("status", "")).strip().upper() == "IDEA" and str(record.get("topic", "")).strip():
+            return row_number, record
     return None, None
 
 
-def get_column_map(headers):
-    return {name: index + 1 for index, name in enumerate(headers)}
-
-
-def update_cell(worksheet, row, col, value):
-    return run_with_retry(
-        f"Updating cell R{row}C{col}",
-        lambda: worksheet.update_cell(row, col, value),
-        max_attempts=6,
-    )
-
-
-def update_story_row(worksheet, row_number, headers, story_data):
-    col = get_column_map(headers)
-
-    updates = {
-        "script": story_data.get("script", ""),
-        "title": story_data.get("title", ""),
-        "description": story_data.get("description", ""),
-        "status": GENERATED_STATUS,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-
-    for column_name, value in updates.items():
-        if column_name in col:
-            update_cell(worksheet, row_number, col[column_name], value)
-
-
-def mark_row_failed(worksheet, row_number, headers, error_message):
-    col = get_column_map(headers)
-
-    if "status" in col:
-        update_cell(worksheet, row_number, col["status"], FAILED_STATUS)
-
-    if "description" in col:
-        short_error = f"FAILED: {str(error_message)[:400]}"
-        update_cell(worksheet, row_number, col["description"], short_error)
-
-    if "created_at" in col:
-        update_cell(
-            worksheet,
-            row_number,
-            col["created_at"],
-            datetime.now(timezone.utc).isoformat(),
-        )
-
-
-# =========================
-# GEMINI
-# =========================
-
-def configure_gemini():
-    genai.configure(api_key=GEMINI_API_KEY)
-
-
-def extract_json_from_text(text):
-    """
-    Gemini sometimes returns JSON inside markdown fences.
-    This extracts the first valid JSON object.
-    """
+def clean_json_text(text):
     if not text:
-        raise RuntimeError("Gemini returned empty response.")
-
+        raise RuntimeError("Gemini returned empty text.")
     cleaned = text.strip()
-
     cleaned = re.sub(r"^```json\s*", "", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"^```\s*", "", cleaned)
     cleaned = re.sub(r"\s*```$", "", cleaned)
+    return cleaned.strip()
 
+
+def parse_json_response(text):
+    cleaned = clean_json_text(text)
     try:
         return json.loads(cleaned)
     except json.JSONDecodeError:
-        pass
-
-    match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
-    if not match:
-        raise RuntimeError(f"Could not find JSON object in Gemini response:\n{cleaned}")
-
-    try:
+        match = re.search(r"\{.*\}", cleaned, flags=re.DOTALL)
+        if not match:
+            raise RuntimeError(f"Could not find JSON in Gemini response:\n{cleaned[:1200]}")
         return json.loads(match.group(0))
-    except json.JSONDecodeError as e:
-        raise RuntimeError(f"Invalid JSON from Gemini:\n{cleaned}") from e
+
+
+def split_sentences(script):
+    parts = re.split(r"(?<=[.!?])\s+", re.sub(r"\s+", " ", script).strip())
+    parts = [p.strip() for p in parts if p.strip()]
+    return parts or [script.strip()]
+
+
+def fallback_scene_payload(title, script, animal, lesson):
+    sentences = split_sentences(script)
+    scene_count = min(7, max(5, len(sentences)))
+    chunks = []
+    for i in range(scene_count):
+        if i < len(sentences):
+            chunks.append(sentences[i])
+        else:
+            chunks.append(sentences[-1])
+
+    animal_clean = animal or "small animal"
+    name = "Pip"
+    character_desc = (
+        f"A consistent cute {animal_clean} named {name}, expressive eyes, soft rounded 2D storybook style, "
+        "same character in every scene, warm family-friendly design."
+    )
+    scenes = []
+    emotion_order = ["curious", "worried", "lonely", "brave", "determined", "hopeful", "heartfelt"]
+    for idx, narration in enumerate(chunks, start=1):
+        emotion = emotion_order[min(idx - 1, len(emotion_order) - 1)]
+        scenes.append({
+            "scene_number": idx,
+            "narration_en": narration,
+            "subtitle_en": narration,
+            "emotion": emotion,
+            "image_prompt": (
+                f"{character_desc} Scene {idx}: {narration}. Emotional cinematic lighting, "
+                "vertical 9:16, no text, no watermark, no logo."
+            ),
+        })
+    return {
+        "character": {"name": name, "animal_type": animal_clean, "description": character_desc},
+        "hook_text": chunks[0][:80],
+        "comment_prompt": "What would you do?",
+        "scenes": scenes,
+    }
+
+
+def normalize_scene_payload(raw_payload, title, script, animal, lesson):
+    if isinstance(raw_payload, str) and raw_payload.strip():
+        try:
+            raw_payload = json.loads(raw_payload)
+        except Exception:
+            raw_payload = None
+
+    if not isinstance(raw_payload, dict):
+        return fallback_scene_payload(title, script, animal, lesson)
+
+    payload = raw_payload
+    if "scenes" not in payload or not isinstance(payload.get("scenes"), list) or len(payload.get("scenes", [])) < 3:
+        return fallback_scene_payload(title, script, animal, lesson)
+
+    character = payload.get("character") if isinstance(payload.get("character"), dict) else {}
+    if not character.get("description"):
+        character["description"] = f"A consistent cute {animal or 'animal'} character in warm 2D storybook style."
+    if not character.get("name"):
+        character["name"] = "Pip"
+    if not character.get("animal_type"):
+        character["animal_type"] = animal or "animal"
+
+    scenes = []
+    for idx, scene in enumerate(payload.get("scenes", []), start=1):
+        if not isinstance(scene, dict):
+            continue
+        narration = str(scene.get("narration_en") or scene.get("subtitle_en") or "").strip()
+        if not narration:
+            continue
+        emotion = str(scene.get("emotion") or "emotional").strip().lower()
+        if emotion not in VALID_EMOTIONS:
+            emotion = "emotional"
+        image_prompt = str(scene.get("image_prompt") or "").strip()
+        if not image_prompt:
+            image_prompt = f"{character['description']} Scene: {narration}. Vertical 9:16, no text, no watermark."
+        scenes.append({
+            "scene_number": len(scenes) + 1,
+            "narration_en": narration,
+            "subtitle_en": str(scene.get("subtitle_en") or narration).strip(),
+            "emotion": emotion,
+            "image_prompt": image_prompt,
+        })
+
+    if len(scenes) < 3:
+        return fallback_scene_payload(title, script, animal, lesson)
+
+    return {
+        "character": character,
+        "hook_text": str(payload.get("hook_text") or scenes[0]["narration_en"]).strip()[:90],
+        "comment_prompt": str(payload.get("comment_prompt") or "What would you do?").strip()[:80],
+        "scenes": scenes[:8],
+    }
 
 
 def build_prompt(record):
     topic = str(record.get("topic", "")).strip()
     animal = str(record.get("animal", "")).strip()
     lesson = str(record.get("lesson", "")).strip()
-
     return f"""
-You are writing for a YouTube Shorts channel called "Tiny Brave Tails".
+You write for a YouTube Shorts channel called Tiny Brave Tails.
 
-Channel concept:
-Short emotional animal stories with simple life lessons.
+Channel promise:
+Short emotional animal stories with simple life lessons for a global English-speaking audience.
 
-Target audience:
-Global English-speaking audience.
-Family-friendly.
-Not made only for kids.
-Simple emotional English.
-No violence.
-No gore.
-No politics.
-No religion.
-No copyrighted characters.
-No claim that the story is true unless verified.
-Make it feel cinematic and touching.
+Hard rules:
+- English only.
+- Family-friendly, not made only for kids.
+- No gore, no violence, no religion, no politics.
+- Do not claim the story is true.
+- No copyrighted characters.
+- Keep one consistent animal character across all scenes.
+- Make the first sentence a strong hook.
+- The story must feel emotional, cinematic, and simple.
 
-Video length:
-35 to 55 seconds.
+Input idea:
+Topic: {topic}
+Animal: {animal}
+Life lesson: {lesson}
 
-Structure:
-1. First sentence must be a strong hook.
-2. Introduce the animal quickly.
-3. Show an emotional problem.
-4. Show a brave or kind action.
-5. End with one simple life lesson.
+Return JSON only. No markdown.
 
-Topic:
-{topic}
-
-Animal:
-{animal}
-
-Life lesson:
-{lesson}
-
-Return JSON only.
-No markdown.
-No explanation.
-
-JSON format:
+Required JSON schema:
 {{
-  "title": "A short clickable YouTube Shorts title under 70 characters",
-  "script": "The full voiceover script, around 90 to 130 words",
-  "description": "A short YouTube description with a clear emotional summary and hashtags"
+  "title": "Clickable YouTube Shorts title under 70 characters",
+  "script": "Full voiceover script, 90 to 135 words, English only",
+  "description": "Short description plus hashtags including #shorts #animalstory #emotionalstory #lifelessons #tinybravetails",
+  "scene_prompts": {{
+    "character": {{
+      "name": "Short original animal name",
+      "animal_type": "{animal}",
+      "description": "Detailed consistent character description for image generation"
+    }},
+    "hook_text": "Short hook text shown in the first scene",
+    "comment_prompt": "Short engagement question",
+    "scenes": [
+      {{
+        "scene_number": 1,
+        "narration_en": "One short narration sentence or two",
+        "subtitle_en": "Same or shorter subtitle text",
+        "emotion": "curious",
+        "image_prompt": "Vertical 9:16 2D storybook image prompt, no text, no watermark"
+      }}
+    ]
+  }}
 }}
+
+Create 5 to 7 scenes. Each scene narration must be short enough for voiceover.
 """.strip()
 
 
-def validate_story_data(data):
+def validate_story(data, record):
     if not isinstance(data, dict):
         raise RuntimeError("Gemini response is not a JSON object.")
-
     title = str(data.get("title", "")).strip()
     script = str(data.get("script", "")).strip()
     description = str(data.get("description", "")).strip()
-
     if not title:
         raise RuntimeError("Gemini response missing title.")
-
     if not script:
         raise RuntimeError("Gemini response missing script.")
-
     if not description:
         raise RuntimeError("Gemini response missing description.")
-
-    word_count = len(script.split())
-    if word_count < 60:
-        raise RuntimeError(f"Generated script is too short: {word_count} words.")
-
-    if word_count > 170:
-        raise RuntimeError(f"Generated script is too long: {word_count} words.")
-
+    wc = len(script.split())
+    if wc < 55:
+        raise RuntimeError(f"Generated script is too short: {wc} words.")
+    if wc > 180:
+        raise RuntimeError(f"Generated script is too long: {wc} words.")
     if "#shorts" not in description.lower():
         description += "\n\n#shorts #animalstory #emotionalstory #lifelessons #tinybravetails"
-
+    scene_payload = normalize_scene_payload(
+        data.get("scene_prompts"), title, script,
+        str(record.get("animal", "")).strip(), str(record.get("lesson", "")).strip()
+    )
     return {
         "title": title[:95],
         "script": script,
-        "description": description,
+        "description": description[:4900],
+        "scene_prompts": json.dumps(scene_payload, ensure_ascii=False),
     }
 
 
-def generate_story_with_gemini(record):
-    configure_gemini()
+def configure_gemini():
+    if not GEMINI_API_KEY:
+        raise RuntimeError("Missing required environment variable: GEMINI_API_KEY")
+    genai.configure(api_key=GEMINI_API_KEY)
 
+
+def call_model(model_name, prompt):
     model = genai.GenerativeModel(
-        GEMINI_MODEL,
+        model_name,
         generation_config={
-            "temperature": 0.9,
+            "temperature": 0.85,
             "top_p": 0.95,
             "top_k": 40,
-            "max_output_tokens": 1200,
+            "max_output_tokens": 4500,
         },
     )
+    response = model.generate_content(prompt)
+    text = getattr(response, "text", None)
+    if not text:
+        try:
+            text = response.candidates[0].content.parts[0].text
+        except Exception as exc:
+            raise RuntimeError(f"Could not read Gemini response text: {response}") from exc
+    return text
 
+
+def generate_story(record):
+    configure_gemini()
     prompt = build_prompt(record)
-
-    def call_gemini():
-        response = model.generate_content(prompt)
-
-        if not response:
-            raise RuntimeError("No response from Gemini.")
-
-        text = getattr(response, "text", None)
-
-        if not text:
-            try:
-                text = response.candidates[0].content.parts[0].text
-            except Exception as e:
-                raise RuntimeError(f"Could not read Gemini response text: {response}") from e
-
-        parsed = extract_json_from_text(text)
-        return validate_story_data(parsed)
-
-    return run_with_retry(
-        "Generating story with Gemini",
-        call_gemini,
-        max_attempts=5,
-    )
+    errors = []
+    for model_name in MODEL_CANDIDATES:
+        try:
+            print(f"Trying Gemini model: {model_name}")
+            text = run_with_retry(f"Generating story with {model_name}", lambda: call_model(model_name, prompt), max_attempts=3)
+            data = parse_json_response(text)
+            story = validate_story(data, record)
+            print(f"Gemini model used: {model_name}")
+            return story, model_name
+        except Exception as exc:
+            errors.append(f"{model_name}: {exc}")
+            if "404" in str(exc) or "not found" in str(exc).lower() or "not supported" in str(exc).lower():
+                print(f"Model {model_name} is unavailable. Trying next model...")
+                continue
+            raise
+    raise RuntimeError("All Gemini models failed. " + " | ".join(errors))
 
 
-# =========================
-# MAIN
-# =========================
+def set_row_success(sheet, row_number, headers, story, model_used):
+    col = {name: idx + 1 for idx, name in enumerate(headers)}
+    updates = {
+        "script": story["script"],
+        "title": story["title"],
+        "description": story["description"],
+        "scene_prompts": story["scene_prompts"],
+        "status": "GENERATED",
+        "image_status": "PENDING",
+        "audio_status": "",
+        "youtube_status": "",
+        "youtube_video_id": "",
+        "video_url": "",
+        "video_file_path": "",
+        "error_message": "",
+        "created_at": now_iso(),
+    }
+    for name, value in updates.items():
+        if name in col:
+            update_cell(sheet, row_number, col[name], value)
+
+
+def set_row_failed(sheet, row_number, headers, error):
+    col = {name: idx + 1 for idx, name in enumerate(headers)}
+    if "status" in col:
+        update_cell(sheet, row_number, col["status"], "FAILED")
+    if "error_message" in col:
+        update_cell(sheet, row_number, col["error_message"], str(error)[:500])
+    if "created_at" in col:
+        update_cell(sheet, row_number, col["created_at"], now_iso())
+
 
 def main():
     print("Starting Tiny Brave Tails story generator...")
+    require_env("GOOGLE_SHEET_ID")
+    require_env("GOOGLE_SERVICE_ACCOUNT_JSON")
+    require_env("GEMINI_API_KEY")
 
-    validate_environment()
+    client = get_sheets_client()
+    spreadsheet = open_spreadsheet(client)
+    content_sheet = get_worksheet(spreadsheet, CONTENT_SHEET_NAME)
+    try:
+        logs_sheet = get_worksheet(spreadsheet, LOGS_SHEET_NAME)
+    except Exception:
+        logs_sheet = None
 
-    client = get_gspread_client()
-    spreadsheet = open_sheet_with_retry(client, SHEET_ID)
-    worksheet = get_worksheet(spreadsheet)
-
-    headers = ensure_headers(worksheet)
-    records = get_all_records_with_retry(worksheet)
-
-    row_number, record = find_first_idea_row(records)
-
+    headers = ensure_headers(content_sheet)
+    records = get_all_records(content_sheet)
+    row_number, record = find_first_idea(records)
     if not record:
-        print("No rows with status IDEA found. Nothing to generate.")
+        log(logs_sheet, "", "GENERATE_STORY", "No IDEA rows found.")
+        print("No IDEA rows found.")
         return
 
-    print(f"Found IDEA row: {row_number}")
-    print(f"Topic: {record.get('topic', '')}")
-    print(f"Animal: {record.get('animal', '')}")
-    print(f"Lesson: {record.get('lesson', '')}")
-
+    video_id = str(record.get("id", "")).strip()
+    print(f"Found IDEA row {row_number}. ID={video_id}. Topic={record.get('topic')}. Animal={record.get('animal')}")
     try:
-        story_data = generate_story_with_gemini(record)
-
-        print("Generated title:")
-        print(story_data["title"])
-
-        print("Generated script:")
-        print(story_data["script"])
-
-        update_story_row(
-            worksheet=worksheet,
-            row_number=row_number,
-            headers=headers,
-            story_data=story_data,
-        )
-
-        print(f"Row {row_number} updated successfully with status {GENERATED_STATUS}.")
-
-    except Exception as e:
-        print(f"Generation failed for row {row_number}: {e}")
-        mark_row_failed(
-            worksheet=worksheet,
-            row_number=row_number,
-            headers=headers,
-            error_message=e,
-        )
+        story, model_used = generate_story(record)
+        set_row_success(content_sheet, row_number, headers, story, model_used)
+        log(logs_sheet, video_id, "GENERATE_STORY", f"Generated story using {model_used}: {story['title']}")
+        print(f"Row {row_number} updated to GENERATED. Title: {story['title']}")
+    except Exception as exc:
+        print(f"Generation failed for row {row_number}: {exc}")
+        set_row_failed(content_sheet, row_number, headers, exc)
+        log(logs_sheet, video_id, "FAILED_STORY", str(exc)[:1000])
         raise
 
 

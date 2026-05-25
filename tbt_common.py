@@ -1,0 +1,120 @@
+import json
+import os
+import random
+import time
+from datetime import datetime, timezone
+
+import gspread
+from gspread.exceptions import APIError
+from google.oauth2.service_account import Credentials as ServiceCredentials
+
+SHEET_SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive",
+]
+
+TRANSIENT_ERROR_TEXT = [
+    "429", "500", "502", "503", "504", "timeout", "timed out",
+    "temporarily", "temporary", "service unavailable", "service is currently unavailable",
+    "internal error", "connection", "deadline exceeded", "rate limit",
+]
+
+
+def utc_now():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+
+
+def is_retryable_error(error):
+    text = str(error).lower()
+    return any(signal in text for signal in TRANSIENT_ERROR_TEXT)
+
+
+def run_with_retry(action_name, func, max_attempts=6, max_wait_seconds=60):
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            print(f"{action_name}... attempt {attempt}/{max_attempts}")
+            return func()
+        except Exception as exc:
+            last_error = exc
+            if not is_retryable_error(exc):
+                print(f"Non-retryable error during {action_name}: {exc}")
+                raise
+            wait_seconds = min(max_wait_seconds, (2 ** attempt) + random.uniform(0, 3))
+            print(f"Temporary error during {action_name}: {exc}")
+            print(f"Waiting {wait_seconds:.1f} seconds before retry...")
+            time.sleep(wait_seconds)
+    raise RuntimeError(f"{action_name} failed after {max_attempts} attempts. Last error: {last_error}")
+
+
+def require_env(name):
+    value = os.getenv(name, "").strip()
+    if not value:
+        raise RuntimeError(f"Missing required environment variable: {name}")
+    return value
+
+
+def get_sheets_client(service_account_json=None):
+    raw_json = service_account_json or require_env("GOOGLE_SERVICE_ACCOUNT_JSON")
+    try:
+        service_account_info = json.loads(raw_json)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("GOOGLE_SERVICE_ACCOUNT_JSON is not valid JSON. Copy the full service-account JSON into GitHub Secrets.") from exc
+    credentials = ServiceCredentials.from_service_account_info(service_account_info, scopes=SHEET_SCOPES)
+    return gspread.authorize(credentials)
+
+
+def open_spreadsheet(client, sheet_id=None):
+    sid = sheet_id or require_env("GOOGLE_SHEET_ID")
+    return run_with_retry("Opening Google Spreadsheet", lambda: client.open_by_key(sid))
+
+
+def get_worksheet(spreadsheet, preferred_name="Content"):
+    try:
+        return run_with_retry(f"Opening worksheet '{preferred_name}'", lambda: spreadsheet.worksheet(preferred_name), max_attempts=4)
+    except Exception as exc:
+        print(f"Could not open worksheet '{preferred_name}': {exc}")
+        print("Trying first worksheet instead...")
+        return run_with_retry("Opening first worksheet", lambda: spreadsheet.get_worksheet(0), max_attempts=4)
+
+
+def get_all_values(sheet):
+    return run_with_retry("Reading worksheet values", lambda: sheet.get_all_values())
+
+
+def get_all_records(sheet):
+    return run_with_retry("Reading worksheet records", lambda: sheet.get_all_records())
+
+
+def update_cell(sheet, row, col, value):
+    return run_with_retry(f"Updating cell R{row}C{col}", lambda: sheet.update_cell(row, col, value))
+
+
+def append_row(sheet, row):
+    return run_with_retry("Appending log row", lambda: sheet.append_row(row, value_input_option="USER_ENTERED"))
+
+
+def find_column(headers, name):
+    if name not in headers:
+        raise ValueError(f"Missing required column: {name}")
+    return headers.index(name) + 1
+
+
+def find_optional_column(headers, name):
+    return headers.index(name) + 1 if name in headers else None
+
+
+def get_cell(row, col):
+    return row[col - 1].strip() if col and len(row) >= col and row[col - 1] is not None else ""
+
+
+def update_optional(sheet, row_number, col, value):
+    if col:
+        update_cell(sheet, row_number, col, value)
+
+
+def log(logs_sheet, video_id, action, message):
+    if logs_sheet is None:
+        print(f"LOG {action}: {message}")
+        return
+    append_row(logs_sheet, [utc_now(), video_id, action, str(message)[:1500]])

@@ -11,16 +11,19 @@ from pathlib import Path
 from urllib.parse import quote_plus
 
 import edge_tts
-import gspread
 import requests
 from gtts import gTTS
-from google.oauth2.service_account import Credentials
 from moviepy.editor import AudioFileClip, ImageClip, concatenate_videoclips, vfx
 from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
+from tbt_common import (
+    get_sheets_client, open_spreadsheet, get_worksheet, get_all_values,
+    update_cell, update_optional, find_column, find_optional_column, get_cell, log, require_env
+)
 
-SHEET_ID = os.environ["GOOGLE_SHEET_ID"]
-SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
+
+SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
+SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
 
 CONTENT_SHEET_NAME = "Content"
 LOGS_SHEET_NAME = "Logs"
@@ -47,41 +50,6 @@ VOICE_BY_EMOTION = {
     "happy": ("en-US-AriaNeural", "+5%", "+8%"),
     "emotional": ("en-US-AriaNeural", "+0%", "+4%"),
 }
-
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
-
-
-def get_sheets_client():
-    service_account_info = json.loads(SERVICE_ACCOUNT_JSON)
-    credentials = Credentials.from_service_account_info(service_account_info, scopes=SCOPES)
-    return gspread.authorize(credentials)
-
-
-def find_column(headers, name):
-    if name not in headers:
-        raise ValueError(f"Missing required column: {name}")
-    return headers.index(name) + 1
-
-
-def find_optional_column(headers, name):
-    return headers.index(name) + 1 if name in headers else None
-
-
-def get_cell(row, col):
-    return row[col - 1].strip() if col and len(row) >= col else ""
-
-
-def update_optional(sheet, row_number, col, value):
-    if col:
-        sheet.update_cell(row_number, col, value)
-
-
-def log(logs_sheet, video_id, action, message):
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    logs_sheet.append_row([now, video_id, action, message], value_input_option="USER_ENTERED")
 
 
 def safe_filename(value):
@@ -374,12 +342,17 @@ def create_video(video_id, title, scene_payload):
 
 
 def main():
+    require_env("GOOGLE_SHEET_ID")
+    require_env("GOOGLE_SERVICE_ACCOUNT_JSON")
     client = get_sheets_client()
-    spreadsheet = client.open_by_key(SHEET_ID)
-    content_sheet = spreadsheet.worksheet(CONTENT_SHEET_NAME)
-    logs_sheet = spreadsheet.worksheet(LOGS_SHEET_NAME)
+    spreadsheet = open_spreadsheet(client)
+    content_sheet = get_worksheet(spreadsheet, CONTENT_SHEET_NAME)
+    try:
+        logs_sheet = get_worksheet(spreadsheet, LOGS_SHEET_NAME)
+    except Exception:
+        logs_sheet = None
 
-    values = content_sheet.get_all_values()
+    values = get_all_values(content_sheet)
     if not values:
         raise ValueError("Content sheet is empty.")
     headers = values[0]
@@ -415,9 +388,9 @@ def main():
     try:
         scene_payload = json.loads(scene_raw)
         video_path, voice_source = create_video(video_id, title, scene_payload)
-        content_sheet.update_cell(target_row_number, status_col, "VIDEO_CREATED")
-        content_sheet.update_cell(target_row_number, image_status_col, "CREATED")
-        content_sheet.update_cell(target_row_number, audio_status_col, voice_source)
+        update_cell(content_sheet, target_row_number, status_col, "VIDEO_CREATED")
+        update_cell(content_sheet, target_row_number, image_status_col, "CREATED")
+        update_cell(content_sheet, target_row_number, audio_status_col, voice_source)
         update_optional(content_sheet, target_row_number, video_file_path_col, str(video_path))
         update_optional(content_sheet, target_row_number, error_message_col, "")
         log(logs_sheet, video_id, "GENERATE_VIDEO", f"Created English-only retention video: {video_path}. Voice: {voice_source}")

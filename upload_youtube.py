@@ -3,17 +3,20 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 
-import gspread
 from google.oauth2.credentials import Credentials
-from google.oauth2.service_account import Credentials as ServiceCredentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 
-SHEET_ID = os.environ["GOOGLE_SHEET_ID"]
-SERVICE_ACCOUNT_JSON = os.environ["GOOGLE_SERVICE_ACCOUNT_JSON"]
-YOUTUBE_CLIENT_ID = os.environ["YOUTUBE_CLIENT_ID"]
-YOUTUBE_CLIENT_SECRET = os.environ["YOUTUBE_CLIENT_SECRET"]
-YOUTUBE_REFRESH_TOKEN = os.environ["YOUTUBE_REFRESH_TOKEN"]
+from tbt_common import (
+    get_sheets_client, open_spreadsheet, get_worksheet, get_all_values,
+    update_cell, update_optional, find_column, find_optional_column, get_cell, log, require_env, run_with_retry
+)
+
+SHEET_ID = os.getenv("GOOGLE_SHEET_ID", "").strip()
+SERVICE_ACCOUNT_JSON = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON", "").strip()
+YOUTUBE_CLIENT_ID = os.getenv("YOUTUBE_CLIENT_ID", "").strip()
+YOUTUBE_CLIENT_SECRET = os.getenv("YOUTUBE_CLIENT_SECRET", "").strip()
+YOUTUBE_REFRESH_TOKEN = os.getenv("YOUTUBE_REFRESH_TOKEN", "").strip()
 
 CONTENT_SHEET_NAME = "Content"
 LOGS_SHEET_NAME = "Logs"
@@ -21,19 +24,9 @@ OUTPUT_DIR = Path("output")
 
 YOUTUBE_PRIVACY_STATUS = os.environ.get("YOUTUBE_PRIVACY_STATUS", "private").strip().lower()
 SELF_DECLARED_MADE_FOR_KIDS = os.environ.get("SELF_DECLARED_MADE_FOR_KIDS", "false").strip().lower() == "true"
-
-SHEET_SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive",
-]
+CONTAINS_SYNTHETIC_MEDIA = os.environ.get("CONTAINS_SYNTHETIC_MEDIA", "true").strip().lower() == "true"
 
 YOUTUBE_SCOPES = ["https://www.googleapis.com/auth/youtube.upload"]
-
-
-def get_sheets_client():
-    service_account_data = json.loads(SERVICE_ACCOUNT_JSON)
-    credentials = ServiceCredentials.from_service_account_info(service_account_data, scopes=SHEET_SCOPES)
-    return gspread.authorize(credentials)
 
 
 def get_youtube_service():
@@ -46,30 +39,6 @@ def get_youtube_service():
         scopes=YOUTUBE_SCOPES,
     )
     return build("youtube", "v3", credentials=credentials)
-
-
-def find_column(headers, name):
-    if name not in headers:
-        raise ValueError(f"Missing required column: {name}")
-    return headers.index(name) + 1
-
-
-def find_optional_column(headers, name):
-    return headers.index(name) + 1 if name in headers else None
-
-
-def get_cell(row, col):
-    return row[col - 1].strip() if col and len(row) >= col else ""
-
-
-def update_optional(sheet, row_number, col, value):
-    if col:
-        sheet.update_cell(row_number, col, value)
-
-
-def log(logs_sheet, video_id, action, message):
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
-    logs_sheet.append_row([now, video_id, action, message], value_input_option="USER_ENTERED")
 
 
 def safe_filename(value):
@@ -112,7 +81,7 @@ def upload_video_to_youtube(video_path, title, description):
         "snippet": {
             "title": title[:100],
             "description": description[:5000],
-            "categoryId": "1",
+            "categoryId": "15",
             "tags": [
                 "shorts",
                 "animal story",
@@ -128,7 +97,7 @@ def upload_video_to_youtube(video_path, title, description):
         "status": {
             "privacyStatus": privacy_status,
             "selfDeclaredMadeForKids": SELF_DECLARED_MADE_FOR_KIDS,
-            "containsSyntheticMedia": False,
+            "containsSyntheticMedia": CONTAINS_SYNTHETIC_MEDIA,
         },
     }
 
@@ -137,7 +106,7 @@ def upload_video_to_youtube(video_path, title, description):
 
     response = None
     while response is None:
-        upload_status, response = request.next_chunk()
+        upload_status, response = run_with_retry("Uploading YouTube chunk", lambda: request.next_chunk(), max_attempts=5)
         if upload_status:
             progress = int(upload_status.progress() * 100)
             print(f"Upload progress: {progress}%")
@@ -149,12 +118,20 @@ def upload_video_to_youtube(video_path, title, description):
 
 
 def main():
+    require_env("GOOGLE_SHEET_ID")
+    require_env("GOOGLE_SERVICE_ACCOUNT_JSON")
+    require_env("YOUTUBE_CLIENT_ID")
+    require_env("YOUTUBE_CLIENT_SECRET")
+    require_env("YOUTUBE_REFRESH_TOKEN")
     sheets_client = get_sheets_client()
-    spreadsheet = sheets_client.open_by_key(SHEET_ID)
-    content_sheet = spreadsheet.worksheet(CONTENT_SHEET_NAME)
-    logs_sheet = spreadsheet.worksheet(LOGS_SHEET_NAME)
+    spreadsheet = open_spreadsheet(sheets_client)
+    content_sheet = get_worksheet(spreadsheet, CONTENT_SHEET_NAME)
+    try:
+        logs_sheet = get_worksheet(spreadsheet, LOGS_SHEET_NAME)
+    except Exception:
+        logs_sheet = None
 
-    values = content_sheet.get_all_values()
+    values = get_all_values(content_sheet)
     if not values:
         raise ValueError("Content sheet is empty.")
 
@@ -203,17 +180,17 @@ def main():
         youtube_url = f"https://youtu.be/{youtube_video_id}"
         upload_status_value = f"UPLOADED_{privacy_status.upper()}"
 
-        content_sheet.update_cell(target_row_number, youtube_status_col, upload_status_value)
-        content_sheet.update_cell(target_row_number, youtube_video_id_col, youtube_video_id)
-        content_sheet.update_cell(target_row_number, video_url_col, youtube_url)
-        content_sheet.update_cell(target_row_number, status_col, "UPLOADED")
+        update_cell(content_sheet, target_row_number, youtube_status_col, upload_status_value)
+        update_cell(content_sheet, target_row_number, youtube_video_id_col, youtube_video_id)
+        update_cell(content_sheet, target_row_number, video_url_col, youtube_url)
+        update_cell(content_sheet, target_row_number, status_col, "UPLOADED")
         update_optional(content_sheet, target_row_number, error_message_col, "")
 
         log(logs_sheet, video_id, "UPLOAD_YOUTUBE", f"Uploaded {privacy_status} video: {youtube_url}")
         print(f"Uploaded successfully: {youtube_url}")
 
     except Exception as exc:
-        content_sheet.update_cell(target_row_number, status_col, "FAILED_UPLOAD")
+        update_cell(content_sheet, target_row_number, status_col, "FAILED_UPLOAD")
         update_optional(content_sheet, target_row_number, error_message_col, str(exc)[:500])
         log(logs_sheet, video_id, "FAILED_UPLOAD", str(exc)[:1000])
         raise
