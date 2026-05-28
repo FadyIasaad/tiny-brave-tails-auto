@@ -128,8 +128,8 @@ def main():
 
     scenes = json.loads(scene_prompts_raw)
 
-    if not isinstance(scenes, list) or len(scenes) != 3:
-        raise ValueError(f"scene_prompts must contain exactly 3 scenes. Got: {scene_prompts_raw}")
+    if not isinstance(scenes, list) or len(scenes) < 1:
+        raise ValueError(f"scene_prompts must contain at least 1 scene. Got: {scene_prompts_raw}")
 
     client = genai.Client(api_key=GEMINI_API_KEY)
 
@@ -153,7 +153,7 @@ def main():
         logs_sheet,
         video_id,
         "GENERATE_IMAGES",
-        f"Generated 3 images for row {target_row_number}: {created_paths}",
+        f"Generated {len(created_paths)} images for row {target_row_number}: {created_paths}",
     )
 
     print(f"Generated images: {created_paths}")

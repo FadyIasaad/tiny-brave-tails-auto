@@ -3,7 +3,7 @@ google-auth==2.35.0
 google-generativeai==0.8.3
 google-genai>=1.0.0
 moviepy==1.0.3
-Pillow==9.5.0
+Pillow>=10.0.0
 requests==2.32.3
 gTTS==2.5.3
 google-api-python-client==2.151.0

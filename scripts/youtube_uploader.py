@@ -34,7 +34,7 @@ def _get_youtube_client():
 def upload_video(video_path, story_data):
     youtube = _get_youtube_client()
     if youtube is None:
-        return "DRY_RUN_VIDEO_ID"
+        raise RuntimeError("YouTube authentication failed or YOUTUBE_TOKEN_JSON is missing. Cannot upload video.")
 
     body = {
         "snippet": {
