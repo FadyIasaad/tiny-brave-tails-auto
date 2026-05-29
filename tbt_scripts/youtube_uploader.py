@@ -4,19 +4,24 @@ from pathlib import Path
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
+from google.auth.transport.requests import Request
 from config import DEFAULT_PRIVACY_STATUS
-
-SCOPES = ["https://www.googleapis.com/auth/youtube.upload", "https://www.googleapis.com/auth/youtube"]
 
 def _get_youtube_client():
     token_json = os.environ.get("YOUTUBE_TOKEN_JSON", "").strip()
     if not token_json:
-        print("YOUTUBE_TOKEN_JSON not found. Dry-run mode: video was created but not uploaded.")
+        print("YOUTUBE_TOKEN_JSON not found.")
         return None
 
     try:
         info = json.loads(token_json)
-        creds = Credentials.from_authorized_user_info(info, SCOPES)
+        creds = Credentials.from_authorized_user_info(info)
+
+        if not creds.valid:
+            if creds.expired and creds.refresh_token:
+                print("Refreshing YouTube access token...")
+                creds.refresh(Request())
+
         youtube = build("youtube", "v3", credentials=creds)
 
         # Get channel info to let the user know where it's being uploaded
