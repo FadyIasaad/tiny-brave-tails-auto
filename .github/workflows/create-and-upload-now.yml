@@ -6,63 +6,62 @@ on:
 jobs:
   create-and-upload:
     runs-on: ubuntu-latest
-
+    timeout-minutes: 45
     steps:
-      - name: Checkout repository
+      - name: Checkout repo
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.11"
+          python-version: '3.11'
 
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg espeak-ng fonts-dejavu-core fonts-noto-core fonts-noto-color-emoji fonts-noto-extra
 
       - name: Install Python dependencies
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Generate story
+      - name: Generate emotional story
         env:
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
-        run: |
-          python generate_story.py
+        run: python generate_story.py
 
       - name: Generate video
         env:
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_MODEL: ${{ secrets.GEMINI_MODEL }}
-        run: |
-          python generate_video.py
+        run: python generate_video.py
 
-      - name: Verify generated video
+      - name: Verify MP4 exists
         run: |
           echo "Listing output folder:"
           ls -R output || true
-
-          echo "Checking MP4 files:"
-          find output -name "*.mp4" -type f -print
-
           MP4_COUNT=$(find output -name "*.mp4" -type f | wc -l)
-
           if [ "$MP4_COUNT" -eq 0 ]; then
-            echo "No MP4 video was generated."
+            echo "No MP4 video found after generation."
             exit 1
           fi
 
-      - name: Upload video to YouTube
+      - name: Upload to YouTube
         env:
           GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
           GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
-          YOUTUBE_TOKEN_JSON: ${{ secrets.YOUTUBE_TOKEN_JSON }}
-        run: |
-          python upload_youtube.py
+          YOUTUBE_CLIENT_ID: ${{ secrets.YOUTUBE_CLIENT_ID }}
+          YOUTUBE_CLIENT_SECRET: ${{ secrets.YOUTUBE_CLIENT_SECRET }}
+          YOUTUBE_REFRESH_TOKEN: ${{ secrets.YOUTUBE_REFRESH_TOKEN }}
+          YOUTUBE_PRIVACY: private
+        run: python upload_youtube.py
+
+      - name: Upload rendered video artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tiny-brave-tails-output
+          path: output/
