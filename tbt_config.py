@@ -7,7 +7,9 @@ VISUAL_DIR = OUTPUT_DIR / "visuals"
 VIDEO_DIR = OUTPUT_DIR / "videos"
 METADATA_DIR = OUTPUT_DIR / "metadata"
 
-DEFAULT_PRIVACY_STATUS = "private"  # Change to "public" only when you trust the system.
+DEFAULT_PRIVACY_STATUS = "private"
+DEFAULT_EDGE_TTS_VOICE = "en-US-JennyNeural"
+DEFAULT_BEDTIME_VOICE = "en-US-AriaNeural"
 
 VIDEO_TYPES = {
     "bedtime": {

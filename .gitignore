@@ -1,6 +1,8 @@
 __pycache__/
-*.py[cod]
-*$py.class
-output/
-*.log
+*.pyc
 .env
+output/*.mp4
+output/audio/*
+output/frames/*
+output/visuals/*
+!output/.gitkeep
