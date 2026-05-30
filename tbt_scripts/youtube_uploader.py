@@ -5,7 +5,7 @@ from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
-from config import DEFAULT_PRIVACY_STATUS
+from tbt_config import DEFAULT_PRIVACY_STATUS
 
 def _get_youtube_client():
     token_json = os.environ.get("YOUTUBE_TOKEN_JSON", "").strip()

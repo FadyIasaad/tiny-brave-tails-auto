@@ -1,6 +1,6 @@
 import asyncio
 import edge_tts
-from config import AUDIO_DIR
+from tbt_config import AUDIO_DIR
 
 def _ssml_safe_pause_text(text: str) -> str:
     # Improved pacing: add natural pauses after punctuation for better quality.

@@ -7,7 +7,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageFilter
 if not hasattr(Image, "ANTIALIAS"):
     Image.ANTIALIAS = Image.LANCZOS
 from moviepy.editor import ImageClip, AudioFileClip, concatenate_videoclips, CompositeVideoClip, TextClip, ColorClip
-from config import VISUAL_DIR, VIDEO_DIR
+from tbt_config import VISUAL_DIR, VIDEO_DIR
 
 WIDTH, HEIGHT = 1280, 720
 

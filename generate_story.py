@@ -76,40 +76,43 @@ def clean_json_text(text):
     if not text:
         raise RuntimeError("Gemini returned empty text.")
     cleaned = text.strip()
-    cleaned = re.sub(r"^```json\s*", "", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"^```\s*", "", cleaned)
-    cleaned = re.sub(r"\s*```$", "", cleaned)
+    # Remove markdown code blocks if present
+    if "```" in cleaned:
+        # Match from the first { to the last } inside code blocks or just anywhere
+        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if match:
+            cleaned = match.group(0)
+        else:
+            cleaned = re.sub(r"^```json\s*", "", cleaned, flags=re.IGNORECASE)
+            cleaned = re.sub(r"^```\s*", "", cleaned)
+            cleaned = re.sub(r"\s*```$", "", cleaned)
     return cleaned.strip()
 
 
 def parse_json_response(text):
     """
-    Parse Gemini JSON safely.
-    Important: this function never invents missing braces or cuts strings.
-    If JSON is incomplete, it raises a retryable error so Gemini is called again.
+    Parse Gemini JSON safely with improved extraction.
     """
     cleaned = clean_json_text(text)
 
     try:
         return json.loads(cleaned)
-    except json.JSONDecodeError as first_error:
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
+    except json.JSONDecodeError:
+        # Try finding the first { and last } if normal parsing fails
+        match = re.search(r"\{.*\}", cleaned, re.DOTALL)
+        if match:
+            try:
+                return json.loads(match.group(0))
+            except json.JSONDecodeError as e:
+                raise RuntimeError(
+                    f"Malformed JSON from Gemini even after extraction. "
+                    f"JSON error: {e}. Preview: {cleaned[:500]}"
+                )
 
-        if start == -1 or end == -1 or end <= start:
-            raise RuntimeError(
-                "Could not find complete JSON in Gemini response. "
-                f"Preview: {cleaned[:900]}"
-            ) from first_error
-
-        candidate = cleaned[start:end + 1]
-        try:
-            return json.loads(candidate)
-        except json.JSONDecodeError as second_error:
-            raise RuntimeError(
-                "Malformed JSON from Gemini. This is retryable. "
-                f"JSON error: {second_error}. Preview: {cleaned[:900]}"
-            ) from second_error
+        raise RuntimeError(
+            "Could not find valid JSON object in Gemini response. "
+            f"Preview: {cleaned[:500]}"
+        )
 
 
 def split_sentences(script):

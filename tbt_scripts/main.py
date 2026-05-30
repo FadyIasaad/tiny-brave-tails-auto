@@ -1,7 +1,7 @@
 import argparse
 import json
 from pathlib import Path
-from config import VIDEO_TYPES, METADATA_DIR
+from tbt_config import VIDEO_TYPES, METADATA_DIR
 from .story_engine import generate_script
 from .voice_engine import generate_voice
 from .video_engine import render_video
