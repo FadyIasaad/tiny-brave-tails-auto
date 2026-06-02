@@ -1,7 +1,10 @@
 import argparse
 import json
 from pathlib import Path
-from config import VIDEO_TYPES, METADATA_DIR
+try:
+    from config import VIDEO_TYPES, METADATA_DIR
+except ImportError as exc:
+    raise RuntimeError("config.py is missing VIDEO_TYPES or METADATA_DIR. Use the fixed config.py included in this package.") from exc
 from .story_engine import generate_script
 from .voice_engine import generate_voice
 from .video_engine import render_video

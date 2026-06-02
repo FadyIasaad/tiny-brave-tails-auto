@@ -36,7 +36,8 @@ OUTPUT_DIR = Path("output")
 FRAMES_DIR = OUTPUT_DIR / "frames"
 VISUALS_DIR = OUTPUT_DIR / "visuals"
 AUDIO_DIR = OUTPUT_DIR / "audio"
-for folder in [OUTPUT_DIR, FRAMES_DIR, VISUALS_DIR, AUDIO_DIR]:
+VIDEO_DIR = OUTPUT_DIR / "videos"
+for folder in [OUTPUT_DIR, FRAMES_DIR, VISUALS_DIR, AUDIO_DIR, VIDEO_DIR]:
     folder.mkdir(parents=True, exist_ok=True)
 
 WIDTH = 1080
@@ -44,15 +45,16 @@ HEIGHT = 1920
 FPS = 24
 DEFAULT_VOICE = os.getenv("EDGE_TTS_VOICE", "en-US-JennyNeural")
 BEDTIME_VOICE = os.getenv("EDGE_TTS_BEDTIME_VOICE", "en-US-AriaNeural")
+LONG_NARRATION_VOICE = os.getenv("EDGE_TTS_LONG_VOICE", "en-US-AriaNeural")
 
 EMOTION_STYLE = {
-    "wonder": {"voice": BEDTIME_VOICE, "rate": "-8%", "pitch": "+0Hz", "volume": "+0%"},
-    "lonely": {"voice": BEDTIME_VOICE, "rate": "-15%", "pitch": "-4Hz", "volume": "-2%"},
-    "worried": {"voice": BEDTIME_VOICE, "rate": "-12%", "pitch": "-2Hz", "volume": "+0%"},
-    "afraid": {"voice": BEDTIME_VOICE, "rate": "-10%", "pitch": "-5Hz", "volume": "+1%"},
-    "brave": {"voice": DEFAULT_VOICE, "rate": "-6%", "pitch": "+1Hz", "volume": "+2%"},
-    "relieved": {"voice": DEFAULT_VOICE, "rate": "-9%", "pitch": "+0Hz", "volume": "+0%"},
-    "peaceful": {"voice": BEDTIME_VOICE, "rate": "-14%", "pitch": "-3Hz", "volume": "-1%"},
+    "wonder": {"voice": LONG_NARRATION_VOICE, "rate": "-12%", "pitch": "-1Hz", "volume": "+0%"},
+    "lonely": {"voice": LONG_NARRATION_VOICE, "rate": "-18%", "pitch": "-5Hz", "volume": "-1%"},
+    "worried": {"voice": LONG_NARRATION_VOICE, "rate": "-16%", "pitch": "-3Hz", "volume": "+0%"},
+    "afraid": {"voice": LONG_NARRATION_VOICE, "rate": "-15%", "pitch": "-6Hz", "volume": "+0%"},
+    "brave": {"voice": LONG_NARRATION_VOICE, "rate": "-11%", "pitch": "+0Hz", "volume": "+1%"},
+    "relieved": {"voice": LONG_NARRATION_VOICE, "rate": "-13%", "pitch": "-1Hz", "volume": "+0%"},
+    "peaceful": {"voice": LONG_NARRATION_VOICE, "rate": "-18%", "pitch": "-4Hz", "volume": "-1%"},
 }
 
 
@@ -197,8 +199,8 @@ def make_frame(video_id, scene_index, scene, title, image_path, total_scenes):
     brand_font = load_font(42, True)
     title_font = load_font(30, False)
     beat_font = load_font(28, False)
-    en_font = load_font(44, True)
-    ar_font = load_font(39, True, arabic=True)
+    en_font = load_font(40, True)
+    ar_font = load_font(36, True, arabic=True)
     small_font = load_font(28, False)
 
     top = Image.new("RGBA", (WIDTH, 235), (0, 0, 0, 105))
@@ -211,15 +213,17 @@ def make_frame(video_id, scene_index, scene, title, image_path, total_scenes):
     emotion = str(scene.get("emotion", "peaceful")).capitalize()
     draw.text((55, 178), f"{scene_index}/{total_scenes}  •  {emotion}", font=beat_font, fill=(255, 238, 190, 230))
 
-    subtitle_h = 500
+    subtitle_h = 560
     subtitle_y = HEIGHT - subtitle_h - 75
     box = Image.new("RGBA", (WIDTH - 80, subtitle_h), (0, 0, 0, 155)).filter(ImageFilter.GaussianBlur(1))
     bg.alpha_composite(box, (40, subtitle_y))
 
-    en_lines = wrap_ltr(draw, scene.get("subtitle_en") or scene.get("narration_en"), en_font, 910, 4)
-    ar_lines = wrap_arabic(draw, scene.get("subtitle_ar", ""), ar_font, 910, 4)
-    draw_centered_lines(draw, en_lines, en_font, subtitle_y + 150, (255, 255, 255, 255), 8)
-    draw_centered_lines(draw, ar_lines, ar_font, subtitle_y + 350, (255, 232, 170, 255), 8)
+    en_source = scene.get("subtitle_en") or scene.get("narration_en")
+    ar_source = scene.get("subtitle_ar", "")
+    en_lines = wrap_ltr(draw, en_source, en_font, 910, 5)
+    ar_lines = wrap_arabic(draw, ar_source, ar_font, 910, 5)
+    draw_centered_lines(draw, en_lines, en_font, subtitle_y + 180, (255, 255, 255, 255), 7)
+    draw_centered_lines(draw, ar_lines, ar_font, subtitle_y + 405, (255, 232, 170, 255), 7)
 
     bar_x, bar_y, bar_w, bar_h = 120, HEIGHT - 92, 840, 12
     draw.rounded_rectangle((bar_x, bar_y, bar_x + bar_w, bar_y + bar_h), radius=8, fill=(255, 255, 255, 65))
@@ -328,7 +332,7 @@ def create_video(video_id, title, scene_payload):
     character = scene_payload.get("character", {})
     char_desc = character.get("description", "")
     safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(video_id).strip() or "video")
-    video_path = OUTPUT_DIR / f"tiny_brave_tails_{safe_id}.mp4"
+    video_path = VIDEO_DIR / f"tiny_brave_tails_{safe_id}.mp4"
     clips = []
     voice_sources = []
     total_scenes = len(scenes)
@@ -339,7 +343,7 @@ def create_video(video_id, title, scene_payload):
         visual_path = VISUALS_DIR / f"visual_{safe_id}_{i:02d}.jpg"
         try:
             pollinations_image(prompt, visual_path, seed=numeric_seed * 100 + i)
-            time.sleep(0.7)
+            time.sleep(0.25)
         except Exception as exc:
             print(f"Image generation failed for scene {i}: {exc}")
             fallback_background(visual_path, scene.get("emotion", "peaceful"))
@@ -348,7 +352,7 @@ def create_video(video_id, title, scene_payload):
         voice_sources.append(voice_source)
         audio_clip = AudioFileClip(str(audio_path))
         pause_after = min(0.85, max(0.25, float(scene.get("pause_after", 0.35) or 0.35)))
-        duration = max(3.2, audio_clip.duration + pause_after)
+        duration = max(4.0, audio_clip.duration + pause_after)
         frame_path = make_frame(safe_id, i, scene, title, visual_path, total_scenes)
         clip = animated_clip(frame_path, duration, scene.get("camera_motion", "slow_zoom_in")).set_audio(audio_clip)
         clips.append(clip)
@@ -361,7 +365,7 @@ def create_video(video_id, title, scene_payload):
         audio_codec="aac",
         preset="medium",
         threads=2,
-        bitrate="7500k",
+        bitrate="9000k",
         ffmpeg_params=["-crf", "18", "-pix_fmt", "yuv420p", "-movflags", "+faststart", "-profile:v", "high"],
     )
     video.close()
@@ -409,7 +413,7 @@ def main():
     update_cell(content_sheet, target_row_number, status_col, "VIDEO_CREATED")
     update_cell(content_sheet, target_row_number, image_status_col, "CREATED")
     update_cell(content_sheet, target_row_number, audio_status_col, voice_source)
-    log(logs_sheet, video_id, "GENERATE_VIDEO", f"Created emotional bedtime video: {video_path}. Voice: {voice_source}")
+    log(logs_sheet, video_id, "GENERATE_VIDEO", f"Created long emotional video: {video_path}. Voice: {voice_source}")
     print(f"Video created: {video_path}")
     print(f"Voice source: {voice_source}")
 

@@ -112,7 +112,7 @@ def upload_video_to_youtube(video_path: Path, title: str, description: str, cate
         "snippet": {
             "title": title[:100],
             "description": description[:5000],
-            "categoryId": "1",
+            "categoryId": os.getenv("YOUTUBE_CATEGORY_ID", "24"),
         },
         "status": {
             "privacyStatus": privacy,
@@ -168,8 +168,8 @@ def main():
     video_id = get_cell(target_row, id_col)
     title = get_cell(target_row, title_col)
     description = get_cell(target_row, description_col) or (
-        "A soft emotional animal bedtime story with a tiny life lesson.\n\n"
-        "#shorts #bedtimestory #animalstory #emotionalstory #tinybravetails"
+        "A long emotional animal story for a general audience. Not made for kids.\n\n"
+        "#animalstory #emotionalstory #bedtimestory #tinybravetails"
     )
     if not title:
         raise ValueError(f"Missing title in row {target_row_number}")
@@ -177,7 +177,8 @@ def main():
     try:
         video_path = find_video_for_id(video_id)
         update_optional(content_sheet, target_row_number, video_file_path_col, str(video_path))
-        youtube_video_id = upload_video_to_youtube(video_path, title, description)
+        category = get_cell(target_row, find_optional_column(headers, "video_type")) or None
+        youtube_video_id = upload_video_to_youtube(video_path, title, description, category)
         youtube_url = f"https://youtu.be/{youtube_video_id}"
         update_cell(content_sheet, target_row_number, youtube_status_col, "UPLOADED_PRIVATE")
         update_cell(content_sheet, target_row_number, youtube_video_id_col, youtube_video_id)
