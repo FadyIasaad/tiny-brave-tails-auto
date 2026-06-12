@@ -104,32 +104,97 @@ def draw_centered_lines(draw, lines, font, center_y, fill, spacing=9):
         y += h + spacing
 
 
-def fallback_background(output_path, emotion="peaceful"):
+def cinematic_local_illustration(output_path, shot=None, emotion="peaceful", seed=0):
+    """Create a usable cinematic illustrated fallback locally when free image APIs are blocked.
+    This is not AI art, but it prevents dead/blank videos and gives every shot a distinct scene.
+    """
+    shot = shot or {}
+    prompt = str(shot.get("image_prompt") or shot.get("narration_en") or "").lower()
+    emotion = str(emotion or shot.get("emotion") or "peaceful").lower()
     palettes = {
-        "afraid": ((18, 30, 55), (55, 70, 105)),
-        "worried": ((35, 40, 60), (78, 80, 110)),
-        "lonely": ((30, 42, 65), (75, 90, 120)),
-        "brave": ((45, 35, 45), (135, 95, 75)),
-        "relieved": ((45, 65, 75), (130, 120, 95)),
-        "peaceful": ((35, 48, 68), (90, 95, 125)),
-        "wonder": ((38, 45, 80), (120, 95, 145)),
+        "afraid": ((10, 18, 38), (45, 58, 92), (245, 210, 145)),
+        "worried": ((28, 32, 50), (70, 78, 105), (230, 205, 155)),
+        "lonely": ((22, 35, 58), (72, 92, 126), (210, 225, 245)),
+        "brave": ((40, 30, 45), (130, 82, 70), (255, 220, 150)),
+        "relieved": ((38, 62, 76), (118, 125, 96), (250, 225, 165)),
+        "peaceful": ((30, 42, 62), (86, 95, 120), (245, 230, 175)),
+        "wonder": ((30, 40, 80), (112, 88, 145), (250, 220, 180)),
     }
-    top, bottom = palettes.get(str(emotion).lower(), palettes["peaceful"])
+    top, bottom, accent = palettes.get(emotion, palettes["peaceful"])
     img = Image.new("RGB", (WIDTH, HEIGHT), top)
     draw = ImageDraw.Draw(img)
+    # cinematic gradient sky/background
     for y in range(HEIGHT):
         ratio = y / HEIGHT
         color = tuple(int(top[i] * (1 - ratio) + bottom[i] * ratio) for i in range(3))
         draw.line([(0, y), (WIDTH, y)], fill=color)
-    draw.ellipse((760, 130, 940, 310), fill=(250, 230, 170))
-    for i in range(80):
-        x = (i * 137) % WIDTH
-        y = 70 + (i * 83) % 820
-        r = 1 + (i % 3)
-        draw.ellipse((x, y, x + r, y + r), fill=(255, 245, 205))
+
+    # moon / light source
+    moon_x = 760 + (seed % 120) - 60
+    moon_y = 120 + (seed % 70)
+    draw.ellipse((moon_x, moon_y, moon_x + 180, moon_y + 180), fill=accent)
+    for r, a in [(240, 35), (330, 20), (430, 12)]:
+        glow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+        gd = ImageDraw.Draw(glow)
+        gd.ellipse((moon_x + 90 - r, moon_y + 90 - r, moon_x + 90 + r, moon_y + 90 + r), fill=(*accent, a))
+        img = Image.alpha_composite(img.convert("RGBA"), glow).convert("RGB")
+        draw = ImageDraw.Draw(img)
+
+    # environment based on prompt words
+    ground_y = int(HEIGHT * 0.73)
+    draw.rectangle((0, ground_y, WIDTH, HEIGHT), fill=tuple(max(0, c - 22) for c in bottom))
+    if any(w in prompt for w in ["forest", "tree", "branch", "leaves", "moss", "root"]):
+        for i in range(9):
+            x = (i * 157 + seed * 13) % (WIDTH + 260) - 130
+            trunk_w = 26 + (i % 4) * 12
+            draw.rectangle((x, 430 + (i % 3) * 45, x + trunk_w, HEIGHT), fill=(22, 28, 38))
+            draw.ellipse((x - 80, 315 + (i % 4) * 36, x + 160, 585 + (i % 3) * 30), fill=(28, 48, 58))
+    elif any(w in prompt for w in ["rain", "storm", "thunder", "wet"]):
+        for i in range(75):
+            x = (i * 43 + seed * 7) % WIDTH
+            y = (i * 89 + seed * 3) % HEIGHT
+            draw.line((x, y, x - 18, y + 58), fill=(190, 210, 230), width=2)
+    elif any(w in prompt for w in ["cave", "stone", "rock"]):
+        draw.polygon([(0, 390), (210, 260), (420, 430), (WIDTH, 310), (WIDTH, HEIGHT), (0, HEIGHT)], fill=(32, 36, 48))
+        draw.ellipse((210, 560, 900, 1420), fill=(18, 22, 32))
+    else:
+        for i in range(45):
+            x = (i * 137 + seed * 11) % WIDTH
+            y = 80 + (i * 83 + seed * 5) % 860
+            rr = 1 + (i % 3)
+            draw.ellipse((x, y, x + rr, y + rr), fill=(255, 245, 210))
+
+    # animal hero silhouette / turtle-like figure
+    cx = WIDTH // 2 + ((seed % 80) - 40)
+    cy = int(HEIGHT * 0.66)
+    shadow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    sd = ImageDraw.Draw(shadow)
+    sd.ellipse((cx - 205, cy + 145, cx + 210, cy + 215), fill=(0, 0, 0, 95))
+    img = Image.alpha_composite(img.convert("RGBA"), shadow).convert("RGB")
+    draw = ImageDraw.Draw(img)
+    shell = (50, 115, 86) if "turtle" in prompt or "toby" in prompt else (110, 78, 55)
+    draw.ellipse((cx - 170, cy - 80, cx + 155, cy + 165), fill=shell, outline=(225, 205, 150), width=5)
+    draw.ellipse((cx + 95, cy - 20, cx + 210, cy + 80), fill=(76, 135, 95), outline=(225, 205, 150), width=4)
+    draw.ellipse((cx + 162, cy + 18, cx + 177, cy + 33), fill=(250, 230, 160))
+    draw.ellipse((cx + 25, cy + 120, cx + 85, cy + 185), fill=(55, 105, 78))
+    draw.ellipse((cx - 120, cy + 120, cx - 60, cy + 185), fill=(55, 105, 78))
+    draw.arc((cx - 120, cy - 30, cx + 90, cy + 125), 200, 330, fill=(215, 185, 130), width=4)
+    # scarf
+    draw.line((cx + 90, cy + 48, cx + 150, cy + 95), fill=(65, 115, 200), width=16)
+    draw.line((cx + 92, cy + 50, cx + 70, cy + 105), fill=(65, 115, 200), width=12)
+
+    # foreground cinematic bars/vignette
+    vignette = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    vd = ImageDraw.Draw(vignette)
+    vd.rectangle((0, 0, WIDTH, 140), fill=(0, 0, 0, 80))
+    vd.rectangle((0, HEIGHT - 180, WIDTH, HEIGHT), fill=(0, 0, 0, 100))
+    img = Image.alpha_composite(img.convert("RGBA"), vignette).convert("RGB")
     img.save(output_path, quality=95)
     return output_path
 
+
+def fallback_background(output_path, emotion="peaceful"):
+    return cinematic_local_illustration(output_path, {"emotion": emotion}, emotion=emotion, seed=0)
 
 def pollinations_image(prompt, output_path, seed):
     final_prompt = f"""
@@ -148,6 +213,22 @@ Make this a specific scene, not a generic cute animal image. Exact moment: {prom
         img.verify()
     return output_path
 
+
+
+
+def create_visual_image(prompt, output_path, seed, shot):
+    """Best-free visual pipeline.
+    1) Try Pollinations while it is available.
+    2) If it returns 402/429/5xx/network errors, make a local cinematic illustration.
+    This avoids dead videos while still giving one distinct visual per shot.
+    """
+    try:
+        pollinations_image(prompt, output_path, seed=seed)
+        return output_path, "pollinations"
+    except Exception as exc:
+        print(f"Free AI image source failed, using local cinematic illustration for this shot: {exc}")
+        cinematic_local_illustration(output_path, shot=shot, emotion=shot.get("emotion", "peaceful"), seed=seed)
+        return output_path, "local-cinematic"
 
 def prepare_background(path):
     try:
@@ -383,17 +464,16 @@ def create_video(video_id, title, scene_payload):
     video_path = VIDEO_DIR / f"tiny_brave_tails_{safe_id}.mp4"
     clips = []
     voice_sources = []
+    image_sources = []
     total_shots = len(shots)
     numeric_seed = sum(ord(ch) for ch in safe_id) % 100000
 
     for i, shot in enumerate(shots, start=1):
         prompt = f"{shot.get('image_prompt', '')} Emotion: {shot.get('emotion', 'peaceful')}."
         visual_path = VISUALS_DIR / f"visual_{safe_id}_{i:03d}.jpg"
-        try:
-            pollinations_image(prompt, visual_path, seed=numeric_seed * 1000 + i)
-            time.sleep(0.2)
-        except Exception as exc:
-            raise RuntimeError(f"Image generation failed for shot {i}. Refusing to create a bad video without real pictures: {exc}") from exc
+        visual_path, image_source = create_visual_image(prompt, visual_path, seed=numeric_seed * 1000 + i, shot=shot)
+        image_sources.append(image_source)
+        time.sleep(0.15)
 
         audio_path, voice_source = create_shot_audio(shot, safe_id, i)
         voice_sources.append(voice_source)
@@ -423,7 +503,7 @@ def create_video(video_id, title, scene_payload):
             clip.close()
         except Exception:
             pass
-    return video_path, ",".join(sorted(set(voice_sources))) + f" | shots={total_shots}"
+    return video_path, ",".join(sorted(set(voice_sources))) + f" | shots={total_shots} | images={','.join(sorted(set(image_sources)))}"
 
 
 def main():
