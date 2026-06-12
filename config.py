@@ -14,11 +14,11 @@ DEFAULT_PRIVACY_STATUS = DEFAULT_VIDEO_PRIVACY
 DEFAULT_MADE_FOR_KIDS = False
 YOUTUBE_CATEGORY_ID = "24"
 
-# The current free voice ceiling is Edge Neural. For a truly human voice, add ELEVENLABS_API_KEY
-# and ELEVENLABS_VOICE_ID in GitHub Secrets. The code will use ElevenLabs automatically when present.
-DEFAULT_EDGE_TTS_VOICE = "en-US-ChristopherNeural"
-DEFAULT_BEDTIME_VOICE = "en-US-ChristopherNeural"
-DEFAULT_LONG_VOICE = "en-US-ChristopherNeural"
+# Best FREE voice direction: Edge Neural with a soft emotional female narrator.
+# For a truly human/premium voice, add ELEVENLABS_API_KEY and ELEVENLABS_VOICE_ID in GitHub Secrets.
+DEFAULT_EDGE_TTS_VOICE = "en-US-AvaNeural"
+DEFAULT_BEDTIME_VOICE = "en-US-AvaNeural"
+DEFAULT_LONG_VOICE = "en-US-AvaNeural"
 
 # New channel direction: emotional animal stories for a general audience, not made-for-kids.
 CHANNEL_POSITIONING = "Cinematic emotional animal stories for a general audience"
