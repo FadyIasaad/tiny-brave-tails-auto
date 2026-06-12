@@ -43,19 +43,19 @@ for folder in [OUTPUT_DIR, FRAMES_DIR, VISUALS_DIR, AUDIO_DIR, VIDEO_DIR]:
 WIDTH = 1080
 HEIGHT = 1920
 FPS = 24
-HUMAN_VOICE = os.getenv("EDGE_TTS_LONG_VOICE", os.getenv("EDGE_TTS_VOICE", "en-US-ChristopherNeural"))
+HUMAN_VOICE = os.getenv("EDGE_TTS_LONG_VOICE", os.getenv("EDGE_TTS_VOICE", "en-US-AvaNeural"))
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "").strip()
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "").strip()
 ELEVENLABS_MODEL_ID = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2").strip()
 
 EMOTION_STYLE = {
-    "wonder": {"voice": HUMAN_VOICE, "rate": "-8%", "pitch": "-1Hz", "volume": "+0%"},
-    "lonely": {"voice": HUMAN_VOICE, "rate": "-13%", "pitch": "-3Hz", "volume": "-1%"},
-    "worried": {"voice": HUMAN_VOICE, "rate": "-11%", "pitch": "-2Hz", "volume": "+0%"},
-    "afraid": {"voice": HUMAN_VOICE, "rate": "-10%", "pitch": "-4Hz", "volume": "+0%"},
-    "brave": {"voice": HUMAN_VOICE, "rate": "-6%", "pitch": "+0Hz", "volume": "+1%"},
-    "relieved": {"voice": HUMAN_VOICE, "rate": "-8%", "pitch": "-1Hz", "volume": "+0%"},
-    "peaceful": {"voice": HUMAN_VOICE, "rate": "-12%", "pitch": "-2Hz", "volume": "-1%"},
+    "wonder": {"voice": HUMAN_VOICE, "rate": "-13%", "pitch": "+1Hz", "volume": "+0%"},
+    "lonely": {"voice": HUMAN_VOICE, "rate": "-21%", "pitch": "-5Hz", "volume": "-1%"},
+    "worried": {"voice": HUMAN_VOICE, "rate": "-18%", "pitch": "-4Hz", "volume": "+0%"},
+    "afraid": {"voice": HUMAN_VOICE, "rate": "-16%", "pitch": "-6Hz", "volume": "+0%"},
+    "brave": {"voice": HUMAN_VOICE, "rate": "-11%", "pitch": "-1Hz", "volume": "+1%"},
+    "relieved": {"voice": HUMAN_VOICE, "rate": "-15%", "pitch": "-2Hz", "volume": "+0%"},
+    "peaceful": {"voice": HUMAN_VOICE, "rate": "-19%", "pitch": "-4Hz", "volume": "-1%"},
 }
 
 
@@ -376,6 +376,9 @@ def create_video(video_id, title, scene_payload):
     shots = flatten_story(scene_payload)
     if not shots:
         raise ValueError("No scenes/shots found in scene_prompts.")
+    min_required_shots = 12 if len(shots) >= 12 else 4
+    if len(shots) < min_required_shots:
+        raise ValueError(f"Too few cinematic shots found: {len(shots)}. Reset the row to IDEA and regenerate the story.")
     safe_id = re.sub(r"[^A-Za-z0-9_-]", "_", str(video_id).strip() or "video")
     video_path = VIDEO_DIR / f"tiny_brave_tails_{safe_id}.mp4"
     clips = []
@@ -390,8 +393,7 @@ def create_video(video_id, title, scene_payload):
             pollinations_image(prompt, visual_path, seed=numeric_seed * 1000 + i)
             time.sleep(0.2)
         except Exception as exc:
-            print(f"Image generation failed for shot {i}: {exc}")
-            fallback_background(visual_path, shot.get("emotion", "peaceful"))
+            raise RuntimeError(f"Image generation failed for shot {i}. Refusing to create a bad video without real pictures: {exc}") from exc
 
         audio_path, voice_source = create_shot_audio(shot, safe_id, i)
         voice_sources.append(voice_source)

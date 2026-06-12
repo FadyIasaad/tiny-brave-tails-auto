@@ -144,8 +144,8 @@ def emotional_score(data: Dict[str, Any]) -> int:
 def build_prompt(topic: str, animal: str, lesson: str, video_type: str, target_minutes: int, scene_count: int, character: Dict[str, str], audience: str) -> str:
     if video_type == "short":
         beats = SHORT_BEATS
-        target_words = "95 to 145"
-        instruction = "Create a powerful emotional YouTube Short."
+        target_words = "120 to 175"
+        instruction = "Create a powerful emotional YouTube Short with an immediate hook, cinematic tension, and a meaningful ending."
     else:
         beats = [LONG_BEATS[i % len(LONG_BEATS)] for i in range(scene_count)]
         # Slow emotional narration is roughly 120-145 wpm. This target is intentionally realistic for GitHub Actions.
@@ -175,12 +175,12 @@ Target narration length: {target_words} English words
 Exact scene count: {scene_count}
 
 Hard quality rules:
-- This must be a real story with a wound, desire, conflict, choice, cost, and earned release.
+- This must be a real story with a sharp first-line hook, wound, desire, conflict, choice, cost, and earned release.
 - Do not write childish educational narration. No counting, colors lessons, nursery tone, baby words, or "kids" wording.
 - Do not say the story is true. No gore, horror, explicit violence, politics, religion, or adult sexual content.
 - Keep it monetization-safe and general-audience friendly.
 - Toby the turtle must feel consistent: slow, wise, flawed, emotionally restrained, not a mascot.
-- Every scene needs a distinct action/location/emotion so the video does not repeat the same visual.
+- Every scene needs a distinct action/location/emotion so the video does not repeat the same visual. The first scene must be visually urgent within 2 seconds.
 - Use cinematic sensory detail: rain on leaves, lantern light, wet stones, quiet breathing, old shell, distant thunder.
 - English narration only. Do not create Arabic translation or Arabic subtitles.
 - Every scene must include exactly 4 visually different shots. Each shot needs its own narration_en and image_prompt.
@@ -188,6 +188,8 @@ Hard quality rules:
 - Every image_prompt must describe camera angle, lighting, location, action, emotion, and character design. Generic prompts are forbidden.
 - No direct moral lecture. Let the meaning land through the ending.
 - Every image_prompt must include the exact character design and a different visual composition.
+- The first shot must be a scroll-stopping cinematic image: danger, loneliness, rescue, storm, empty street, broken promise, or emotional mystery.
+- Narration must sound like a human storyteller, not an essay. Use short emotional sentences, silence, and restraint.
 
 Scene beats:
 {beat_text}
