@@ -1,8 +1,0 @@
-__pycache__/
-*.pyc
-.env
-output/*.mp4
-output/audio/*
-output/frames/*
-output/visuals/*
-!output/.gitkeep
