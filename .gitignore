@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+.env
+output/audio/*
+output/frames/*
+output/visuals/*
+output/videos/*
+!output/.gitkeep
+.DS_Store
+Thumbs.db
