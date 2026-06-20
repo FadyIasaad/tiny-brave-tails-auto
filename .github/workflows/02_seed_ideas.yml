@@ -1,0 +1,45 @@
+name: "02 - Seed Content Ideas"
+
+on:
+  workflow_dispatch:
+    inputs:
+      video_type:
+        description: "Which type to seed"
+        required: true
+        default: "all"
+        type: choice
+        options:
+          - all
+          - short
+          - horror_story
+          - confession_story
+      count_per_type:
+        description: "Target number of IDEA rows to keep queued per type"
+        required: true
+        default: "20"
+
+jobs:
+  seed-ideas:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run seed_content_ideas.py
+        env:
+          GOOGLE_SHEET_ID: ${{ secrets.GOOGLE_SHEET_ID }}
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
+          TBT_VIDEO_TYPE: ${{ inputs.video_type }}
+          TBT_COUNT_PER_TYPE: ${{ inputs.count_per_type }}
+        run: python seed_content_ideas.py
