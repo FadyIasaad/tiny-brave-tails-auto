@@ -437,33 +437,88 @@ def clamp_cell(text: str, max_chars: int = 49000) -> str:
 
 
 def trim_payload_for_cell(payload: Dict[str, Any], max_chars: int = 49000) -> str:
-    """Serialize scene_payload and trim if needed to fit Google Sheets 50k char cell limit."""
-    serialized = json.dumps(payload, ensure_ascii=False)
-    if len(serialized) <= max_chars:
-        return serialized
+    """
+    Serialize scene_payload and shrink it until it fits Google Sheets' 50k
+    char-per-cell limit. Escalates through progressively more aggressive steps,
+    and ends with a guaranteed hard cap so it can NEVER return something bigger
+    than the limit, no matter how large the story is.
+    """
+    import copy
+    payload = copy.deepcopy(payload)
+
+    def size(p):
+        return len(json.dumps(p, ensure_ascii=False))
+
+    if size(payload) <= max_chars:
+        return json.dumps(payload, ensure_ascii=False)
+
     # Step 1: strip redundant scene-level fields already present in shots
     for scene in payload.get("scenes", []):
         scene.pop("image_prompt", None)
         scene.pop("narration_en", None)
         scene.pop("subtitle_en", None)
-    serialized = json.dumps(payload, ensure_ascii=False)
-    if len(serialized) <= max_chars:
-        return serialized
+    if size(payload) <= max_chars:
+        return json.dumps(payload, ensure_ascii=False)
+
     # Step 2: truncate shot image_prompts
     for scene in payload.get("scenes", []):
         for shot in scene.get("shots", []):
             if len(shot.get("image_prompt", "")) > 280:
                 shot["image_prompt"] = shot["image_prompt"][:280]
-    serialized = json.dumps(payload, ensure_ascii=False)
-    if len(serialized) <= max_chars:
-        return serialized
-    # Step 3: truncate shot narration too
+    if size(payload) <= max_chars:
+        return json.dumps(payload, ensure_ascii=False)
+
+    # Step 3: truncate shot narration and drop subtitle duplicates
     for scene in payload.get("scenes", []):
         for shot in scene.get("shots", []):
             if len(shot.get("narration_en", "")) > 200:
                 shot["narration_en"] = shot["narration_en"][:200]
             shot.pop("subtitle_en", None)
-    return json.dumps(payload, ensure_ascii=False)
+    if size(payload) <= max_chars:
+        return json.dumps(payload, ensure_ascii=False)
+
+    # Step 4: progressively tighten narration further until it fits (long
+    # stories with many scenes can still be over the limit after step 3).
+    for limit in (150, 120, 100, 80, 60):
+        for scene in payload.get("scenes", []):
+            for shot in scene.get("shots", []):
+                n = shot.get("narration_en", "")
+                if len(n) > limit:
+                    shot["narration_en"] = n[:limit]
+                # At the tightest levels, also drop per-shot image prompts; the
+                # renderer falls back to scene/generic visuals, which is far
+                # better than failing to save the story at all.
+                if limit <= 100:
+                    shot.pop("image_prompt", None)
+        if size(payload) <= max_chars:
+            return json.dumps(payload, ensure_ascii=False)
+
+    # Step 5 (guaranteed): hard-cap the serialized JSON. We keep as many whole
+    # scenes as fit, so the video still renders from valid JSON rather than a
+    # broken truncated string.
+    scenes = payload.get("scenes", [])
+    lo, hi = 1, len(scenes)
+    best = None
+    while lo <= hi:
+        mid = (lo + hi) // 2
+        trial = dict(payload)
+        trial["scenes"] = scenes[:mid]
+        if size(trial) <= max_chars:
+            best = json.dumps(trial, ensure_ascii=False)
+            lo = mid + 1
+        else:
+            hi = mid - 1
+    if best is not None:
+        return best
+
+    # Absolute last resort: a minimal valid payload (should never be reached).
+    minimal = {
+        "video_type": payload.get("video_type", "horror_story"),
+        "target_minutes": payload.get("target_minutes", ""),
+        "scenes": scenes[:1] if scenes else [],
+    }
+    out = json.dumps(minimal, ensure_ascii=False)
+    return out[:max_chars]
 
 
 def _precall_pacing_delay():
