@@ -931,9 +931,11 @@ def create_video(video_id, title, scene_payload, video_type="horror_story"):
         raise ValueError(f"Too few shots ({len(shots)}). Regenerate story first.")
     safe_id    = re.sub(r"[^A-Za-z0-9_-]", "_", str(video_id).strip() or "video")
     video_path = VIDEO_DIR / f"nightfall_diaries_{safe_id}.mp4"
-    clips, voice_sources, visual_sources = [], [], []
+    seg_paths, voice_sources, visual_sources = [], [], []
+    temp_paths_to_clean = []
     thumb_source_path = None
     shot_durations = []
+    n_shots = len(shots)
 
     for i, shot in enumerate(shots, start=1):
         audio_path, voice_source = create_shot_audio(shot, safe_id, i)
@@ -956,7 +958,40 @@ def create_video(video_id, title, scene_payload, video_type="horror_story"):
             frame_path = make_frame(safe_id, i, shot, title, visual_path, len(shots))
             clip = animated_photo_clip(frame_path, duration, shot.get("camera_motion", "slow_zoom_in")).set_audio(audio_clip)
 
-        clips.append(clip)
+        # Apply fade transitions per-segment (fade-to-black between shots).
+        # First shot: no fadein; last shot: no fadeout. Matches original behaviour.
+        if ENABLE_TRANSITIONS and TRANSITION_SECONDS > 0:
+            fade = min(TRANSITION_SECONDS, max(0.0, clip.duration / 3.0))
+            if fade > 0:
+                if i > 1:
+                    clip = fadein(clip, fade)
+                if i < n_shots:
+                    clip = fadeout(clip, fade)
+
+        # Render this shot to a temp segment and immediately free memory.
+        # Processing one clip at a time keeps peak RAM ~constant regardless of
+        # story length, avoiding the OOM kill that occurred when all clips were
+        # accumulated before calling concatenate_videoclips.
+        seg_path = VIDEO_DIR / f"seg_{safe_id}_{i:04d}.mp4"
+        clip.write_videofile(
+            str(seg_path),
+            fps=FPS,
+            codec="libx264",
+            audio_codec="aac",
+            preset="faster",
+            threads=2,
+            bitrate="4000k",
+            ffmpeg_params=["-crf", "20", "-pix_fmt", "yuv420p"],
+        )
+        try:
+            if clip.audio:
+                clip.audio.close()
+            clip.close()
+        except Exception:
+            pass
+        seg_paths.append(seg_path)
+        temp_paths_to_clean.append(seg_path)
+        print(f"[{i}/{n_shots}] Shot rendered.")
         time.sleep(0.1)
 
     # End screen: for long-form videos, append a short outro card nudging the
@@ -964,52 +999,53 @@ def create_video(video_id, title, scene_payload, video_type="horror_story"):
     # in YouTube Studio; this on-screen card earns the extra session time. No
     # extra TTS call (keeps it free-tier safe); the ambient bed carries it.
     normalized_type_for_outro = str(video_type or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if ENABLE_END_SCREEN and END_SCREEN_SECONDS > 0 and normalized_type_for_outro != "short" and len(clips) > 0:
+    if ENABLE_END_SCREEN and END_SCREEN_SECONDS > 0 and normalized_type_for_outro != "short" and seg_paths:
         try:
             outro_path = make_end_screen_frame(safe_id, title)
             outro_clip = animated_photo_clip(outro_path, float(END_SCREEN_SECONDS), "slow_zoom_in")
-            clips.append(outro_clip)
+            if ENABLE_TRANSITIONS and TRANSITION_SECONDS > 0:
+                fade = min(TRANSITION_SECONDS, max(0.0, outro_clip.duration / 3.0))
+                if fade > 0:
+                    outro_clip = fadein(outro_clip, fade)
+            seg_end = VIDEO_DIR / f"seg_{safe_id}_end.mp4"
+            outro_clip.write_videofile(
+                str(seg_end),
+                fps=FPS, codec="libx264", audio_codec="aac",
+                preset="faster", threads=2, bitrate="4000k",
+                ffmpeg_params=["-crf", "20", "-pix_fmt", "yuv420p"],
+            )
+            outro_clip.close()
+            seg_paths.append(seg_end)
+            temp_paths_to_clean.append(seg_end)
             shot_durations.append(float(END_SCREEN_SECONDS))
         except Exception as exc:
             print(f"End screen skipped (non-fatal): {exc}")
-    # Light crossfade between shots instead of a hard cut, kept small so it
-    # never feels gimmicky. A video-only fade (audio stays aligned to each
-    # shot's narration). Disabled via config if not wanted.
-    if ENABLE_TRANSITIONS and TRANSITION_SECONDS > 0 and len(clips) > 1:
-        faded = []
-        for idx, c in enumerate(clips):
-            # Don't fade longer than a third of the clip.
-            fade = min(TRANSITION_SECONDS, max(0.0, c.duration / 3.0))
-            if fade <= 0:
-                faded.append(c)
-                continue
-            if idx > 0:
-                c = fadein(c, fade)
-            if idx < len(clips) - 1:
-                c = fadeout(c, fade)
-            faded.append(c)
-        clips = faded
 
-    video = concatenate_videoclips(clips, method="compose")
-    # Use "faster" preset (not "medium") so long horror/confession renders don't
-    # hit the GitHub Actions 6-hour limit.  YouTube re-encodes anyway, so the
-    # small quality trade-off is invisible to viewers.
-    video.write_videofile(
-        str(video_path),
-        fps=FPS,
-        codec="libx264",
-        audio_codec="aac",
-        preset="faster",
-        threads=2,
-        bitrate="4000k",
-        ffmpeg_params=["-crf", "20", "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+    # Concatenate all segments using ffmpeg concat demuxer (stream copy — no
+    # re-encode, so the final file is assembled in seconds regardless of length).
+    concat_list = VIDEO_DIR / f"concat_{safe_id}.txt"
+    temp_paths_to_clean.append(concat_list)
+    with open(str(concat_list), "w") as f:
+        for sp in seg_paths:
+            f.write(f"file '{sp.resolve()}'\n")
+    result = subprocess.run(
+        [
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0", "-i", str(concat_list),
+            "-c", "copy",
+            "-movflags", "+faststart",
+            str(video_path),
+        ],
+        capture_output=True, text=True,
     )
-    video.close()
-    for clip in clips:
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg concat failed:\n{result.stderr[-3000:]}")
+    print(f"Concatenated {len(seg_paths)} segments → {video_path}")
+
+    # Clean up temp segment files
+    for tp in temp_paths_to_clean:
         try:
-            if clip.audio:
-                clip.audio.close()
-            clip.close()
+            Path(tp).unlink(missing_ok=True)
         except Exception:
             pass
 
