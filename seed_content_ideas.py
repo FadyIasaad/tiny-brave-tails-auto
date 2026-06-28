@@ -55,6 +55,26 @@ def load_ideas():
         return list(csv.DictReader(f))
 
 
+def make_unique_id(base, existing_ids):
+    """Return base if unused, otherwise base-r2, base-r3, ... so we can recycle
+    a finite pool of CSV ideas without ever colliding with ids already in use."""
+    base = (base or "ND").strip()
+    if base not in existing_ids:
+        return base
+    n = 2
+    while f"{base}-r{n}" in existing_ids:
+        n += 1
+    return f"{base}-r{n}"
+
+
+def build_row(item, headers):
+    row = [""] * len(headers)
+    for key, value in item.items():
+        if key in headers:
+            row[headers.index(key)] = str(value).strip()
+    return row
+
+
 def main():
     requested_type = os.getenv("TBT_VIDEO_TYPE", "all").strip().lower() or "all"
     count_per_type = int(os.getenv("TBT_COUNT_PER_TYPE", "20"))
@@ -78,40 +98,27 @@ def main():
             if status == "IDEA" and vtype in existing_idea_counts:
                 existing_idea_counts[vtype] += 1
 
-    rows_to_append = []
-    added_counts = {t: 0 for t in VALID_TYPES}
+    # Group available CSV ideas by type so we can top up each type's IDEA
+    # backlog independently -- and recycle them with fresh ids once the finite
+    # pool of CSV ids is exhausted, so a type can never permanently starve.
+    ideas_by_type = {t: [] for t in VALID_TYPES}
     for item in load_ideas():
         vtype = (item.get("video_type") or "horror_story").strip().lower()
-        if vtype not in VALID_TYPES:
-            continue
-        if requested_type != "all" and vtype != requested_type:
-            continue
-        if existing_idea_counts[vtype] + added_counts[vtype] >= count_per_type:
-            continue
-        idea_id = (item.get("id") or "").strip()
-        if not idea_id or idea_id in existing_ids:
-            continue
-        row = [""] * len(headers)
-        for key, value in item.items():
-            if key in headers:
-                row[headers.index(key)] = str(value).strip()
-        if "status" in headers and not row[headers.index("status")]:
-            row[headers.index("status")] = "IDEA"
-        if "made_for_kids" in headers and not row[headers.index("made_for_kids")]:
-            row[headers.index("made_for_kids")] = "FALSE"
-        rows_to_append.append(row)
-        existing_ids.add(idea_id)
-        added_counts[vtype] += 1
+        if vtype in ideas_by_type:
+            ideas_by_type[vtype].append(item)
 
-    if not rows_to_append:
-        print("No new ideas needed. Existing IDEA backlog already meets the requested count.")
-        print("Existing IDEA counts:", existing_idea_counts)
-        return
+    types_to_seed = sorted(VALID_TYPES) if requested_type == "all" else [requested_type]
 
-    run_with_retry("Appending balanced content ideas", lambda: sheet.append_rows(rows_to_append, value_input_option="USER_ENTERED"))
-    print(f"Appended {len(rows_to_append)} IDEA rows.")
-    print("Added by type:", {k: v for k, v in sorted(added_counts.items()) if v})
-
-
-if __name__ == "__main__":
-    main()
+    rows_to_append = []
+    added_counts = {t: 0 for t in VALID_TYPES}
+    for vtype in types_to_seed:
+        items = ideas_by_type.get(vtype, [])
+        if not items:
+            print(f"Warning: no ideas of type '{vtype}' in {IDEAS_FILE}; skipping.")
+            continue
+        need = count_per_type - existing_idea_counts[vtype]
+        for k in range(max(0, need)):
+            item = items[k % len(items)]
+            base_id = (item.get("id") or "").strip() or ("ND-" + vtype.upper())
+            idea_id = make_unique_id(base_id, existing_ids)
+      
