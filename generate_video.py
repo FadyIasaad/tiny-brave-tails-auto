@@ -604,23 +604,16 @@ async def create_edge_audio_async(text, output_path, emotion="calm"):
     clean = humanize_text(text)
     last_error = None
 
+    # IMPORTANT: edge-tts does NOT support hand-written SSML. If you pass an SSML
+    # string it gets escaped and the voice literally reads the markup aloud (the
+    # "it just reads the tags / system voice" bug). Use edge-tts's native
+    # rate/pitch/volume parameters on PLAIN narration text instead — that applies
+    # the per-emotion prosody correctly while speaking the actual story.
     for attempt in range(3):
         if attempt > 0:
             wait = 2 ** attempt  # 2s, 4s
             print(f"edge-tts attempt {attempt + 1}/3 after {wait}s delay (last error: {last_error})")
             await asyncio.sleep(wait)
-
-        # First try: SSML with per-emotion prosody (best quality)
-        try:
-            ssml = _build_ssml(clean, emotion, style)
-            communicate = edge_tts.Communicate(ssml, voice=voice)
-            await communicate.save(str(output_path))
-            print(f"edge-tts SSML succeeded on attempt {attempt + 1}")
-            return
-        except Exception as exc:
-            last_error = exc
-
-        # Second try (same attempt): plain text with prosody params
         try:
             communicate = edge_tts.Communicate(
                 text=clean,
@@ -630,7 +623,7 @@ async def create_edge_audio_async(text, output_path, emotion="calm"):
                 volume=style["volume"],
             )
             await communicate.save(str(output_path))
-            print(f"edge-tts plain succeeded on attempt {attempt + 1}")
+            print(f"edge-tts succeeded on attempt {attempt + 1}")
             return
         except Exception as exc:
             last_error = exc
