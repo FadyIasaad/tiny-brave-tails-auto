@@ -833,19 +833,48 @@ def stock_video_clip(video_path, duration):
 
 
 # ─── STORY → FLAT SHOT LIST ───────────────────────────────────────────────────
+def distribute_narration(narration, max_shots=4):
+    """Split scene narration into at most max_shots contiguous, non-overlapping
+    chunks so the full narration is spoken exactly ONCE across the shots. Stored
+    per-shot narration often overlapped or restated the whole scene, which made
+    the voice repeat and loop lines; distributing fixes that at render time."""
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", (narration or "").strip()) if s.strip()]
+    if not sentences:
+        text = (narration or "").strip()
+        return [text] if text else [""]
+    n = max(1, min(max_shots, len(sentences)))
+    base, extra = divmod(len(sentences), n)
+    chunks, idx = [], 0
+    for g in range(n):
+        take = base + (1 if g < extra else 0)
+        chunks.append(" ".join(sentences[idx:idx + take]))
+        idx += take
+    return chunks
+
+
 def split_scene_to_shots(scene):
-    if isinstance(scene.get("shots"), list) and scene["shots"]:
-        return scene["shots"][:4]
-    narration = scene.get("narration_en", "")
-    parts = [x.strip() for x in re.split(r"(?<=[.!?])\s+", narration) if x.strip()]
-    if len(parts) < 4:
-        parts = [
-            narration or "The room was quiet, in a way that felt deliberate.",
-            "The night felt too large around it.",
-            "A small sound changed everything.",
-            "Whatever it was, it was not finished yet.",
-        ]
+    scene_narration = str(scene.get("narration_en", "") or "").strip()
+    raw = scene.get("shots") if isinstance(scene.get("shots"), list) else []
+    raw = raw[:4]
     motions = ["slow_zoom_in", "gentle_pan_left", "tiny_handheld", "slow_zoom_out"]
+    if raw:
+        # Distribute the scene narration across the stored shots with NO overlap so
+        # the voice never repeats a line. Keep each shot's own image_prompt/visuals.
+        chunks = distribute_narration(scene_narration, len(raw))
+        out = []
+        for i, shot in enumerate(raw):
+            chunk = chunks[i] if i < len(chunks) else ""
+            s = dict(shot)
+            s["narration_en"] = chunk
+            s["subtitle_en"] = chunk
+            out.append(s)
+        out = [s for s in out if str(s.get("narration_en", "")).strip()]
+        return out or [dict(raw[0], narration_en=scene_narration, subtitle_en=scene_narration)]
+    # No stored shots: derive up to 4 visual shots from the narration sentences.
+    parts = [x.strip() for x in re.split(r"(?<=[.!?])\s+", scene_narration) if x.strip()]
+    if not parts:
+        parts = [scene_narration or "The room was quiet, in a way that felt deliberate."]
+    parts = parts[:4]
     return [
         {
             "shot_number":  i + 1,
@@ -856,7 +885,7 @@ def split_scene_to_shots(scene):
             "camera_motion": motions[i % 4],
             "pause_after":  0.25,
         }
-        for i, part in enumerate(parts[:4])
+        for i, part in enumerate(parts)
     ]
 
 def flatten_story(scene_payload):

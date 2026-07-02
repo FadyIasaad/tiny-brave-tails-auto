@@ -364,6 +364,25 @@ def normalize_shot(shot: Dict[str, Any], n: int, scene_narration: str, scene_pro
     }
 
 
+def distribute_narration(narration: str, max_shots: int = 4):
+    """Split a scene's narration into at most max_shots contiguous, non-overlapping
+    chunks so the full narration is spoken exactly ONCE across the shots. Using the
+    model's per-shot narration directly made the voice repeat and loop lines; this
+    guarantees the audio matches the script with no repeats."""
+    sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", (narration or "").strip()) if s.strip()]
+    if not sentences:
+        text = (narration or "").strip()
+        return [text] if text else [""]
+    n = max(1, min(max_shots, len(sentences)))
+    base, extra = divmod(len(sentences), n)
+    chunks, idx = [], 0
+    for g in range(n):
+        take = base + (1 if g < extra else 0)
+        chunks.append(" ".join(sentences[idx:idx + take]))
+        idx += take
+    return chunks
+
+
 def normalize_scene(scene: Dict[str, Any], i: int, story_context: str, video_type: str) -> Dict[str, Any]:
     narration = str(scene.get("narration_en", "")).strip()
     subtitle_en = str(scene.get("subtitle_en", "")).strip() or narration
@@ -389,7 +408,16 @@ def normalize_scene(scene: Dict[str, Any], i: int, story_context: str, video_typ
     raw_shots = scene.get("shots") if isinstance(scene.get("shots"), list) else []
     if not raw_shots:
         raw_shots = split_into_shots(narration, image_prompt, emotion, story_context, i)
-    shots = [normalize_shot(shot, n, narration, image_prompt, emotion, story_context) for n, shot in enumerate(raw_shots[:4], start=1)]
+    # Speak the scene narration exactly once, split across the shots with no overlap
+    # (fixes the voice repeating / looping lines).
+    narration_chunks = distribute_narration(narration, 4)
+    shots = []
+    for n in range(1, len(narration_chunks) + 1):
+        raw_shot = raw_shots[n - 1] if n - 1 < len(raw_shots) else {}
+        ns = normalize_shot(raw_shot, n, narration, image_prompt, emotion, story_context)
+        ns["narration_en"] = narration_chunks[n - 1]
+        ns["subtitle_en"] = narration_chunks[n - 1]
+        shots.append(ns)
 
     return {
         "scene_number": i,
@@ -594,7 +622,10 @@ def generate_story_package(topic: str, characters: str, theme: str, video_type="
     if video_type == "short":
         scene_count = 3
     else:
-        scene_count = clamp_int(settings.get("scene_count", 24), 18, 14, 60)
+        # Scale scene count with duration and keep it modest: fewer, richer scenes
+        # produce smaller, valid JSON (the model was emitting broken JSON at ~24
+        # scenes) and less bloated videos.
+        scene_count = clamp_int(round(target_minutes * 1.2), 12, 8, 24)
     story_context = build_story_context(characters, narrator_pov, setting)
 
     prompt = build_prompt(topic, characters, theme, video_type, target_minutes, scene_count, story_context, audience)
